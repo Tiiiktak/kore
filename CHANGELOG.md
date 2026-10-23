@@ -4,6 +4,27 @@ All notable changes to **kore** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-10-23
+
+### Fixed
+- **Your own terminal was clipped after opening a session in the dashboard.** The
+  browser resizes the far tmux window to fit its box, which makes tmux pin that window's
+  `window-size` to `manual`; the "release" sent on close wrote `window-size latest`, a value
+  tmux < 3.1 does not know, so the pin was never undone and `tmux attach` from a real
+  terminal showed the browser's geometry. Now:
+  - the window is released right after every resize by **unsetting** the window option
+    (`set-option -w -u`), which restores the user's own tmux default on every version;
+  - while a real terminal is attached, the browser does **not** resize the window at all —
+    your terminal decides the size and the dashboard adapts to it.
+- Already-pinned sessions can be released by hand with
+  `tmux set-option -w -u -t <session> window-size`.
+
+### Changed
+- Broader tmux compatibility instead of hard requirements: typing from the dashboard falls
+  back to `send-keys -l` where `send-keys -H` (tmux 3.0+) is missing, and on tmux < 2.9
+  (no `resize-window`) the dashboard simply shows the window at its own size.
+  `kore doctor` reports the tmux version and which feature degrades, as a warning.
+
 ## [0.3.1] — 2026-10-23
 
 ### Added
@@ -66,5 +87,6 @@ more machines, from a web dashboard or as MCP tools, with an explicit server/cli
   `py_compile`, the routing tests, a packaging smoke that installs the wheel and asserts the
   data files ship) and a tag-triggered Release that builds the wheel + sdist.
 
+[0.3.2]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.2
 [0.3.1]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.0

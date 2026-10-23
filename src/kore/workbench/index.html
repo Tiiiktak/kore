@@ -1547,7 +1547,7 @@ let paneGeomAsked = '';       // 上一次朝对面要过的几何 'CxR'。去�
                               // 两个人抢同一个方向盘（阶段3 否掉 fitAddon.fit() 的同一条理由）
 let paneGeomBusy = false;     // 有一发 resize 在路上
 let paneGeomBorrowed = false; // 这个 pane 有没有真动过对面几何（借过）。关窗/切后台靠它决定要不要
-                              // 还（发一发 auto:true 的 resize 把 window-size 从 manual 松回 latest）。
+                              // 还（发一发 auto:true 的 resize 把 window 交还给 tmux 自己定尺寸）。
                               // 2026-10-13 owner 定「每设备按自己屏铺满」：还的目标不再是「第一次借之前
                               // 对面多大」那个陈旧值（可能是旧 sidebar 页面留下的窄尺寸），而是本设备自己
                               // 的盒子 —— 既不写一个会黏住的窄数，又照常 auto 松开让别的 client 跟自己走
@@ -1918,7 +1918,7 @@ function paneFitGeom(delay) {
 async function paneFitGeomNow() {
   const s = paneTarget;
   if (!s || !paneTerm) return;
-  // 浏览器不在前台:一个贴合都不发。切后台时我们已经把 window 松回 latest(见下面
+  // 浏览器不在前台:一个贴合都不发。切后台时我们已经把 window 交还给 tmux(见下面
   // visibilitychange 的 paneGeomRelease),这期间对面被别的 client 重定尺寸会吐 geom 帧 /
   // 整屏重画,它们都会顺手勾一发 paneFitGeom —— 不挡的话会立刻又把对面借回浏览器盒子,
   // 和让渡打架,把同一个共享 window 的别的 client 又扣住。回前台由 visibilitychange 显式再借。
@@ -1957,6 +1957,8 @@ async function paneFitGeomNow() {
     // 发一条 geom + 一发整屏重画过来（实测：从外面 `tmux resize-window` 也照样出 g）——
     // 那条路比这张回执晚不了多少，而且它是对面的真屏，不是我们这一发顺手带回来的那一瞬。
     if (paneTarget === s && paneWire !== 'bytes') paneEcho(d);
+    // 对面有人用真终端 attach 着:服务端没动窗口(他的终端说了算),这边按对面尺寸显示。
+    if (paneTarget === s && d && d.deferred) paneSay('有终端 attach 着这个 session,按它的尺寸显示');
   } catch (e) {
     // 失败要说出来，而且把 asked 清掉：下一次拖窗口还能再试。不 resync、不清屏 ——
     // 几何没变成想要的样子，屏上的内容仍然是真的，只是有滚动条。
@@ -1965,7 +1967,9 @@ async function paneFitGeomNow() {
   } finally { paneGeomBusy = false; }
 }
 /* 关 pane 的时候把对面「松开」。核心是一件事：
-     auto:true ⇒ 服务端在 resize 之后补一句 `set-option -w window-size latest`。
+     服务端每次 resize 之后都会立刻 `set-option -w -u window-size`(取消窗口级设置,回到用户
+     自己的 tmux 默认值,不写死任何版本才有的取值),而且有真实终端 attach 时根本不抢尺寸
+     (回执带 deferred:true,这边改为适配对面)。auto:true 仍然照发,保持兼容。
      `tmux resize-window` 会把那个 window 的 window-size 钉成 manual（tmux 3.4 上实测过
      show-options 的前后值），这个副作用比这次请求活得长：不松的话，别的 client（操作者自己
      的终端、另一台设备的板子）再 attach / 打开同一个会话，窗口都被钉在这块盒子的尺寸上不跟它们走
@@ -1987,7 +1991,7 @@ function paneGeomRestore(opts) {
                      cols: box.cols, rows: box.rows, auto: true },
          opts && opts.keepalive ? { keepalive: true } : undefined).catch(() => {});
 }
-/* 临时让渡 —— 浏览器切到后台(标签切走 / 手机锁屏回桌面)时把 window 松回 latest,但**不清**
+/* 临时让渡 —— 浏览器切到后台(标签切走 / 手机锁屏回桌面)时把 window 交还给 tmux,但**不清**
    paneGeomBorrowed:人还在看这个 pane、只是不在前台,回前台要再借一次(paneFitGeomNow 盒子没变
    也会再发,因为下面清了去重键)。和关窗 paneGeomRestore 的唯一区别就是不清 borrowed 标志。
    owner 定调:基本一个地方看,所以浏览器一旦不在前台,就该立刻把 window 松开(auto),别把同一个
@@ -2685,7 +2689,7 @@ $('c-pane-close').onclick = () => {
   // fire-and-forget：拿不到就保持原样，不卡关 pane 这条路。
   kRefreshOne(was);
 };
-// 刷新 / 关标签 / 跳走这条是**真走人**:把 window 松回 latest 并清掉借标志（paneGeomRestore）。
+// 刷新 / 关标签 / 跳走这条是**真走人**:把 window 交还给 tmux 并清掉借标志（paneGeomRestore）。
 // 「切后台但人还在看」是另一条路,见下面 visibilitychange —— 那条临时让渡、留着 borrowed 回来再借。
 // 两条分开:走人就该清干净,后台只是暂时让位。不松的后果:对面 window 被钉在贴浏览器盒子的
 // 尺寸（window-size manual），别的 client / 别的设备 attach 进来都被钉住跟不了自己（2026-10-13
@@ -2698,7 +2702,7 @@ addEventListener('pagehide', () => {
 /* 浏览器切前后台时的几何让渡，和 pagehide 同一套、同样留在操控区自己手里 —— c-* 的元素和
    paneGeom* 只有操控区能摸，shell 那边的 visibilitychange 只把「现在是前台还是后台」转进来
    （跟 kCovered 一个道理：判断留在这边，shell 只拿结果）。
-   切后台（标签切走 / 手机锁屏回桌面）：把 window 松回 latest，但留着 paneGeomBorrowed —— 人还在
+   切后台（标签切走 / 手机锁屏回桌面）：把 window 交还给 tmux，但留着 paneGeomBorrowed —— 人还在
    看这个 pane，回前台再借一次。回前台：再贴合一次盒子。没开 pane 就与几何无关，直接不管。 */
 function kVisibility(hidden) {
   if (!kCovered()) return;

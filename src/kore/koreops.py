@@ -1098,6 +1098,22 @@ def _read_call(kind: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
                              "原因看 state/ccops/read-agent.log"}
 
 
+def _send_bytes_cmd(full: str, raw: bytes) -> str:
+    """Shell command that types the bytes `raw` into session `full`, on any tmux version.
+
+    `send-keys -H <hex …>` (tmux >= 3.0) sends exact bytes. Older tmux lacks `-H`, so on
+    failure we fall back to `send-keys -l` (literal, available far longer) with the same
+    bytes rebuilt by POSIX `printf '%b'` from octal escapes. Nothing caller-supplied is
+    quoted here: both encodings are generated from validated bytes, so the only characters
+    that reach the shell are hex digits, backslashes and octal digits. The trailing `X`
+    survives command substitution's newline stripping and is removed with `${k%X}`.
+    """
+    hexs = " ".join(f"{b:02x}" for b in raw)
+    octs = "".join(f"\\0{b:03o}" for b in raw)
+    return (f"{{ tmux send-keys -t {full} -H {hexs} 2>/dev/null || "
+            f"{{ k=\"$(printf '%b' '{octs}X')\"; tmux send-keys -t {full} -l -- \"${{k%X}}\"; }}; }}")
+
+
 def _input_apply(br: Any, node_ip: str, name: str, p: dict[str, Any]) -> dict[str, Any]:
     """Type validated codepoints into a pane and bring back the screen they produced.
 
@@ -1135,7 +1151,6 @@ def _input_apply(br: Any, node_ip: str, name: str, p: dict[str, Any]) -> dict[st
         raw = b"".join(chr(int(c, 16)).encode("utf-8") for c in hx.split(" ") if c)
     except (ValueError, OverflowError, UnicodeEncodeError) as exc:
         return {"ok": False, "error": f"refused: hex {hx[:40]!r} 翻不成 UTF-8：{exc}"}
-    wire = " ".join(f"{b:02x}" for b in raw)
     # ROUND10：回执里那一屏现在是**可选的**，默认仍然带（`echo` 不传 = True，所以老的
     # 调用方、CLI、bridge 那边一个字都不用改）。
     # 为什么要有这条路：ROUND10 之前，浏览器唯一能看见自己打的字的办法就是这一屏 ——
@@ -1150,7 +1165,7 @@ def _input_apply(br: Any, node_ip: str, name: str, p: dict[str, Any]) -> dict[st
     # 表、600/min、per-session lock，上面每一行都照跑。ok 仍然是真的 —— rc≠0 就是没落下去。
     if not bool(p.get("echo", True)):
         with br.session_lock(node_ip, full):
-            r = br.sh(node_ip, f"tmux send-keys -t {full} -H {wire}",
+            r = br.sh(node_ip, _send_bytes_cmd(full, raw),
                       int(pol.get("input_send_timeout_s", 20)))
         rc = int(r.get("rc") or 0)
         err = (r.get("stderr") or "").strip()
@@ -1158,7 +1173,7 @@ def _input_apply(br: Any, node_ip: str, name: str, p: dict[str, Any]) -> dict[st
                 "error": "" if rc == 0 else (err or f"tmux send-keys 退出码 {rc}")[:200],
                 "sent_codepoints": len([c for c in hx.split(" ") if c]),
                 "sent_bytes": len(raw)}
-    settle_cmd = f"tmux send-keys -t {full} -H {wire}; sleep {settle:.3f}; "
+    settle_cmd = f"{_send_bytes_cmd(full, raw)}; sleep {settle:.3f}; "
     with br.session_lock(node_ip, full):
         r = br.sh(node_ip,
                   _term_cmd(full, 0, True, settle=settle_cmd),
@@ -1170,48 +1185,62 @@ def _input_apply(br: Any, node_ip: str, name: str, p: dict[str, Any]) -> dict[st
     return res
 
 
+_RESIZE_DEFERRED = "<<<KORE-RESIZE-DEFERRED>>>"
+
+
 def _resize_apply(br: Any, node_ip: str, name: str, p: dict[str, Any]) -> dict[str, Any]:
-    """Make the far window `cols`×`rows`, and bring back the screen that produced.
+    """Fit the far window to the browser's box — unless a real terminal is attached — and
+    bring back the screen that produced.
 
     Same shape as `_input_apply` and for the same reasons: one `sh()` so the geometry in
     the receipt is the geometry this call created (two round trips could straddle somebody
     else's resize), and under the per-session lock so a resize cannot land between a
     keystroke and its capture.
 
-    `tmux resize-window -x -y` is the whole mechanism. Two honest side effects, neither
-    hidden from the caller:
-      * every client attached to that window repaints at the new size — the operator's own
-        terminal jumps if they are looking at it (a known, accepted trade: fixed font size
-        in the browser means the far window follows the browser's box);
-      * tmux pins `window-size` to `manual` for that window (verified on 3.4:
-        `show-options -w window-size` reads `manual` right after a resize-window), so the
-        window stops following its clients until somebody puts it back. `auto` does that:
-        it sets `window-size` to the tmux default (`latest`) and leaves the geometry alone,
-        which is what a closing pane asks for.
+    A human's own terminal always wins over the browser:
+      * if any NON-control client is attached to the session (someone ran `tmux attach`),
+        the window is left to size itself from that terminal and the browser adapts to the
+        far geometry instead (the receipt carries `deferred: True`). Anything we cannot
+        classify counts as a real terminal — when unsure, do not take the window;
+      * otherwise the window is resized to the box, and then IMMEDIATELY released.
+        `tmux resize-window` pins the window's `window-size` option to `manual`, which would
+        clip any terminal that attaches later. Unsetting the window-level option
+        (`set-option -w -u`) hands sizing back to whatever the user's tmux default is, on
+        every tmux version — no version-specific value like `latest` (3.1+) is written. With
+        no sizing client attached tmux keeps the geometry we just set; the moment a real
+        terminal attaches, the window follows it.
+
+    Portability: `resize-window` / `window-size` need tmux >= 2.9. On older tmux both fail
+    and are ignored (stderr dropped) — the window simply keeps its own size and the browser
+    adapts. `auto` is accepted for compatibility and is now always implied.
     """
     br.validate_ip(node_ip)
     full = br.norm_name(name)
     pol = policy()
     cols, rows = int(p.get("cols") or 0), int(p.get("rows") or 0)
-    auto = bool(p.get("auto"))
     # %d, not a string: the only characters that can reach the far shell from here are
     # digits. The bounds were checked in the parent; re-check the shape in the process that
     # actually holds the shell, like _input_apply does.
     if not (0 < cols < 10000 and 0 < rows < 10000):
         return {"ok": False, "error": f"refused: resize {cols}x{rows} is not a geometry"}
-    pre = f"tmux resize-window -t {full} -x {cols:d} -y {rows:d}; "
-    if auto:
-        # Order matters: resize first, then hand the window back to its clients. The other
-        # way round, `window-size latest` with no client attached would leave tmux free to
-        # ignore the geometry we just asked for.
-        pre += f"tmux set-option -t {full} -w window-size latest; "
+    release = f"tmux set-option -t {full} -w -u window-size 2>/dev/null; "
+    pre = (
+        # Any attached client whose control-mode flag is not exactly "1" is a real terminal
+        # (kore's own taps are control clients). An unsupported format prints "" -> real.
+        f"if tmux list-clients -t {full} -F '#{{client_control_mode}}' 2>/dev/null "
+        f"| grep -qv '^1$'; then "
+        f"printf '%s\\n' '{_RESIZE_DEFERRED}'; {release}"
+        f"else tmux resize-window -t {full} -x {cols:d} -y {rows:d} 2>/dev/null; {release}"
+        f"fi; ")
     with br.session_lock(node_ip, full):
         r = br.sh(node_ip,
                   _term_cmd(full, 0, True, settle=pre),
                   int(pol.get("term_capture_timeout_s", 20)))
-    res = _term_parse(br, node_ip, full, r.get("stdout") or "", r.get("stderr") or "",
+    out = r.get("stdout") or ""
+    res = _term_parse(br, node_ip, full, out, r.get("stderr") or "",
                       True, int(pol.get("term_max_bytes", 262144)))
-    res["asked"] = {"cols": cols, "rows": rows, "auto": auto}
+    res["deferred"] = _RESIZE_DEFERRED in out.split("\n")
+    res["asked"] = {"cols": cols, "rows": rows, "auto": True}
     return res
 
 
@@ -1634,13 +1663,10 @@ def _validate_params(pol: dict[str, Any], verb: str, params: dict[str, Any]) -> 
             raise KoreOpsError(f"refused: cols {cols} outside [{lo_c}, {hi_c}]")
         if not lo_r <= rows <= hi_r:
             raise KoreOpsError(f"refused: rows {rows} outside [{lo_r}, {hi_r}]")
-        # `auto` is the way back out. `tmux resize-window` pins that window's
-        # `window-size` option to `manual`, which survives this request, this browser tab
-        # and this board — so whoever attaches their own terminal to the session next
-        # would find it stuck at a browser's geometry. A viewer that resized a window asks
-        # for `auto` when it closes the pane, and tmux goes back to sizing the window from
-        # its attached clients. It is the same verb and the same gate because it is the
-        # same authority: it writes an option on somebody else's window.
+        # `auto` is accepted for compatibility only: _resize_apply now ALWAYS releases the
+        # window right after resizing (and never resizes while a real terminal is attached),
+        # so no browser geometry outlives the request. It is still a write — it touches an
+        # option on somebody else's window — so it keeps the same verb and the same gate.
         clean = {"cols": cols, "rows": rows, "auto": bool(params.get("auto"))}
     elif verb == "read":
         clean = {"lines": max(10, min(600, int(params.get("lines") or 120)))}
@@ -2459,14 +2485,14 @@ def main(argv: list[str] | None = None) -> int:
     pin.add_argument("--no-echo", dest="echo", action="store_false", default=True,
                      help="don't capture the resulting screen into the receipt")
 
-    # ROUND9: the window-geometry path, by hand. `--auto` additionally hands the window
-    # back to its attached clients (tmux `window-size latest`), which is how a pane undoes
-    # the `manual` that resize-window pins on. No origin flags, same reason as `input`.
+    # The window-geometry path, by hand. The window is always handed back to tmux right
+    # after resizing, and left alone while a real terminal is attached. `--auto` is kept for
+    # compatibility. No origin flags, same reason as `input`.
     prz = target(sub.add_parser("resize", help="resize the far tmux window"))
     prz.add_argument("--cols", type=int, required=True)
     prz.add_argument("--rows", type=int, required=True)
     prz.add_argument("--auto", action="store_true",
-                     help="also set window-size back to latest (follow attached clients)")
+                     help="compatibility no-op (the window is always released after resizing)")
 
     origin_flags(target(sub.add_parser("stop", help="kill the tmux session")))
 

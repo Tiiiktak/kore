@@ -473,6 +473,24 @@ def _doctor(_rest: list) -> int:
             lvl = "WARN" if tool == "claude" else "FAIL"
             add(lvl, f"{tool} on PATH", "not found")
 
+    # tmux version: informational. kore degrades instead of requiring a minimum — older
+    # tmux only loses the browser-fits-the-window feature (needs `resize-window`, 2.9+).
+    if shutil.which("tmux"):
+        try:
+            tv = subprocess.run(["tmux", "-V"], capture_output=True, text=True,
+                                timeout=5).stdout.strip()
+        except Exception:  # noqa: BLE001
+            tv = ""
+        m = re.search(r"(\d+)\.(\d+)", tv)
+        if not m:
+            add("PASS", "tmux version", tv or "unknown (assuming a recent build)")
+        elif (int(m.group(1)), int(m.group(2))) < (2, 9):
+            add("WARN", "tmux version",
+                f"{tv} — works; the browser shows the window at its own size instead of "
+                f"fitting it (resize-window needs tmux 2.9+)")
+        else:
+            add("PASS", "tmux version", tv)
+
     token = _env("AGENT_TOKEN", "")
     if token:
         add("PASS", "agent token", "set (client /exec fenced)")
