@@ -1,0 +1,48 @@
+name: Release
+
+# Push a version tag to cut a release:
+#   git tag v0.1.0 && git push origin v0.1.0
+# The tag must match the version in pyproject.toml / src/kore/__init__.py.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # create the GitHub Release + upload artifacts (no PyPI, no PAT)
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Check the tag matches the package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          # version is dynamic (src/kore/__init__.py __version__) — read it from there
+          PKG="$(grep -oP '^__version__\s*=\s*"\K[^"]+' src/kore/__init__.py)"
+          echo "tag=$TAG pkg=$PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag v$TAG does not match src/kore/__init__.py version $PKG"
+            exit 1
+          fi
+
+      - name: Build the wheel + sdist
+        run: uv build
+
+      - name: Create the GitHub Release and upload artifacts (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists; uploading/overwriting artifacts"
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --notes "Install: \`uvx --from git+https://github.com/${GITHUB_REPOSITORY}@${GITHUB_REF_NAME} kore serve\`"
+          fi

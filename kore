@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""Clone-and-run launcher — no install, no uv, stdlib only.
+
+    git clone <repo> && cd kore && ./kore serve
+
+Puts ./src on the path and hands off to the same CLI as the installed console-script.
+`kore.cli` locates its packaged data via its own __file__, so this works identically
+from a source clone (src/kore/) and from an installed wheel (site-packages/kore/).
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+
+from kore.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())

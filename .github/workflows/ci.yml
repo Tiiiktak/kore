@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Byte-compile every source (incl. hyphenated / extension-less)
+        run: |
+          python -m py_compile \
+            src/kore/koreops.py \
+            src/kore/kore-bridge.py \
+            src/kore/kore-agent.py \
+            src/kore/cli.py src/kore/__init__.py src/kore/__main__.py \
+            src/kore/workbench/server.py src/kore/workbench/state.py \
+            kore
+
+      - name: Routing unit tests (self-local + http client, no network)
+        run: python tests/test_transport.py
+
+      - name: Lint the service script
+        run: bash -n src/kore/workbench/service.sh
+
+      - name: Validate the write policy JSON
+        run: python -c "import json; json.load(open('src/kore/dispatch-allowlist.json')); print('dispatch-allowlist.json ok')"
+
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: System deps for the doctor smoke
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Build the wheel + sdist
+        run: uv build
+      - name: Install the wheel into a throwaway venv
+        run: |
+          uv venv /tmp/korewheel
+          uv pip install --python /tmp/korewheel/bin/python dist/*.whl
+      - name: Prove the package shipped all data files
+        run: |
+          /tmp/korewheel/bin/python - <<'PY'
+          import os, kore
+          d = os.path.dirname(kore.__file__)
+          must = [
+              "koreops.py", "kore-bridge.py", "kore-agent.py",
+              "dispatch-allowlist.json",
+              "workbench/index.html",
+              "workbench/vendor/xterm/xterm.js",
+              "workbench/vendor/xterm/xterm.css",
+          ]
+          missing = [m for m in must if not os.path.exists(os.path.join(d, m))]
+          assert not missing, f"wheel is missing packaged data: {missing}"
+          print("data ok:", ", ".join(must))
+          PY
+      - name: Packaging smoke — the installed console-script runs
+        run: |
+          /tmp/korewheel/bin/kore doctor
+          /tmp/korewheel/bin/kore --help

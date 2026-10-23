@@ -1,0 +1,53 @@
+# Changelog
+
+All notable changes to **kore** are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.3.0] — 2026-10-23
+
+Initial public release. kore manages Claude Code sessions running in tmux across one or
+more machines, from a web dashboard or as MCP tools, with an explicit server/client model.
+
+### Architecture
+- **Explicit server/client model.** Start the central node with `kore server` — it is also
+  a worker, so a single machine needs nothing else. Add machines with
+  `kore client --server <ip:port> --token <tok>`. The engine routes **per node** with no
+  switch and no configuration: the server's own host runs commands locally with
+  `subprocess`, and every client is reached over HTTP through its stdlib agent.
+- **Join by pasting a printed command.** `kore server` mints an agent token
+  (`~/.kore/agent.token`, 0600) and prints a `kore client …` join line (k3s / tailscale
+  style). A client reports in by POSTing its record to the server's register door every
+  heartbeat; within the agent TTL its node appears in the roster. There is no shared-file
+  registry and no assumption of shared storage.
+- **Two token domains.** The WB token (browser ↔ dashboard, also the one-click share-link
+  token) and the agent token (`KORE_AGENT_TOKEN`: server ↔ client, the client-join secret
+  and the `/exec` fence) are separate. A browser token can never reach a node; an agent
+  token can never drive a pane.
+- **Stdlib only.** No third-party runtime dependencies.
+
+### CLI
+- Commands: `kore server`, `kore client`, `kore down`, `kore status`, `kore upgrade`,
+  `kore mcp`, `kore ops`, `kore doctor`. Bare `kore` prints help.
+- `kore server --restart` applies new config to a running board. `kore upgrade` updates in
+  place (git clone fast-forward, or `uv tool` reinstall); `--version vX.Y.Z` pins a tag,
+  `--check` only compares. For a private repo, export `KORE_GITHUB_TOKEN`.
+
+### Dashboard
+- **Multi-session tabs.** An OpenCode-style titlebar carries the kore wordmark, a
+  horizontal session-tab strip, and a version pill. Opening a session from the roster adds
+  a tab; several stay open and you switch between them. A pinned **Home** tab returns to the
+  roster; **+** jumps to Home and expands the new-session form. One live terminal is reused
+  (the `MAX_STREAMS` budget is unchanged). Per-tab close (×) detaches without killing;
+  killing stays the explicit red button on the roster row.
+- Live xterm.js terminal into any pane over SSE (keystrokes, resize, scroll), plus a
+  low-latency byte stream (tmux control mode). Token-authed; every endpoint but
+  `/api/health` requires the WB token, and writes additionally demand a Bearer header and a
+  `confirm` that names the node + session.
+
+### Packaging
+- hatchling build, MIT license, console-script `kore`. GitHub Actions for CI (multi-version
+  `py_compile`, the routing tests, a packaging smoke that installs the wheel and asserts the
+  data files ship) and a tag-triggered Release that builds the wheel + sdist.
+
+[0.3.0]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.0

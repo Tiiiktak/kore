@@ -1,0 +1,2915 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>kore 工作台</title>
+<style>
+  /* ── design tokens ──────────────────────────────────
+     2026-09-25 换肤：深色运维面板 → 浅色克制产品界面（参考 DeepSeek Harness 桌面版
+     nightly 的截图：白卡片 + hairline + 极淡阴影 + 大留白 + 黑色主按钮）。
+     颜色字面量只允许出现在这个块里，规则一律用变量。 */
+  :root{
+    /* 表面 */
+    --bg:#f5f5f7; --panel:#ffffff; --panel2:#fafafa;
+    --line:#e8e8ea; --line2:#f1f1f3; --edge:#c7c7cc; --thumb:#d2d2d7;
+    /* 文字 */
+    --text:#1d1d1f; --dim:#6e6e73; --faint:#8e8e93;
+    /* 黑色主按钮（参考图「登录」/「开始设置」/「继续」/「+ 添加插件」） */
+    --btn:#111111; --btn-text:#ffffff; --btn-hover:#000000;
+    /* 状态色：GitHub light 那套，浅底上可读；不沿用深色主题的高饱和 */
+    --ok:#1a7f37; --busy:#9a6700; --bad:#cf222e; --idle:#0969da; --accent:#8250df;
+    /* claude-code logo 那个珊瑚橙（启动 banner 的颜色）—— pane 的加载屏 + 头条那个方块 logo 用 */
+    --claude:#d77757;
+    --ok-bg:#e9f5ec; --busy-bg:#fdf4e0; --bad-bg:#fdecec; --idle-bg:#e9f2fd; --accent-bg:#f2ecfd;
+    --ok-line:#b7ddc2; --busy-line:#ecd9a3; --bad-line:#f5c4c4;
+    --idle-line:#bed9f8; --accent-line:#ddc9f8; --accent-wash:#f8f5fe;
+    /* 深度：参考图的卡片几乎只有 1px hairline + 极淡阴影，不用重边框 */
+    --shadow:0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.05);
+    --shadow-lg:0 14px 36px rgba(16,24,40,.16);
+    --scrim:rgba(29,29,31,.34);
+    --ring:0 0 0 3px rgba(9,105,218,.12);
+    /* 节奏：参考图的留白量级明显大于原来的紧凑排版 */
+    --r:12px; --r-sm:8px; --gap:12px;
+    /* 顶栏（品牌 + 会话 Tab + 版本）的高度，pane 终端据此往下让位 */
+    --titlebar-h:46px;
+    /* 交互叠色：hover/选中的极淡黑色蒙层（OpenCode 那套 overlay 的轻量版） */
+    --ov-hover:rgba(0,0,0,.045); --ov-active:rgba(0,0,0,.075);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--text);
+    font:13px/1.55 "Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC",Roboto,sans-serif;
+    display:flex; flex-direction:column; overflow:hidden;
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
+  .mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+  /* 浅色底上默认滚动条太重，压成细的 */
+  ::-webkit-scrollbar{width:10px; height:10px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:var(--thumb); border-radius:8px;
+                            border:3px solid var(--panel); background-clip:padding-box}
+  ::-webkit-scrollbar-thumb:hover{background:var(--faint); background-clip:padding-box}
+
+  /* ── 通用小件 ─────────────────────────────────────── */
+  /* 线性单色小图标：内联 SVG，尺寸统一（参考图的文件夹/终端/放大镜都是这一套） */
+  .ico{width:13px; height:13px; flex:0 0 auto; fill:none; stroke:currentColor;
+       stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round}
+  /* 元信息胶囊：参考图中央输入框上方的 `📁 默认工作区 ⌄` `⚙ 标准模式 ⌄` */
+  .pill{
+    display:inline-flex; align-items:center; gap:5px; min-width:0; max-width:100%;
+    height:26px; padding:0 10px; border-radius:var(--r-sm);
+    background:var(--panel2); border:0;
+    color:var(--dim); font-size:11.5px; white-space:nowrap;
+  }
+  .pill>span{overflow:hidden; text-overflow:ellipsis}
+  .pill.warn{color:var(--busy); background:var(--busy-bg); border-color:var(--busy-line)}
+  .pill.err{color:var(--bad); background:var(--bad-bg); border-color:var(--bad-line)}
+  /* 淡底徽章，标注不成熟/未验证的能力（参考图插件列表的「实验性」） */
+  .tag{
+    display:inline-block; margin-left:6px; padding:1px 6px; border-radius:5px;
+    background:var(--accent-bg); color:var(--accent);
+    font-size:10px; font-weight:600; letter-spacing:.2px; white-space:nowrap;
+  }
+
+  /* ── 顶栏：品牌 + Tab。就这两样 ───────────────────────
+     2026-10-19：Tab 从「读/写轴」改成「域轴」—— 不再是「观察(只读)/操控(可写)」，
+     而是「rsi session / kore session」，两个域各一个可写 Tab（rsi 起/停/发，kore 起/杀/打字）。
+     根因：两个域都要写，读/写轴本就无法跟域轴对齐。历史映射：旧「操控 Tab」= 现 kore Tab、
+     旧「观察 Tab」= 现 rsi Tab —— 下面若有注释仍写「观察/操控」，按此映射读。
+     两条元信息带（含 session 切换器）从这里搬进了各自的 pane 子树，所以 header 现在一个
+     表单控件都没有 —— 「切换器不在 header 里」从此是数出来的。代价是 header 的 56px 之外，
+     每个 pane 顶上多一条 36px 的带子；换来的是分区断言不再依赖 showTab() 的运行时行为
+     （这笔账是认过的）。 */
+  /* ── 顶栏 titlebar：品牌 · 会话 Tab 条 · 版本（抄 OpenCode 的设计语言）──
+     OpenCode 的 Tab 只靠**底色填充 + 文字色**区分状态：没有边框、没有下划线、没有任何
+     带颜色的线，也没有「某一边一条线」。顶栏坐在比内容更凹的画布底色（--bg）上，白卡片/
+     深色终端自然地浮在其下，分层靠色阶不靠分隔线。活动 Tab = 一块抬起来的浅色面（填充 +
+     极淡投影），非活动 = 透明只留文字，hover = 一层极淡的黑色蒙层。
+     z-index 高于 pane 终端（它 position:fixed 从 --titlebar-h 往下铺），终端开着也能切 Tab。 */
+  header#titlebar{
+    flex:0 0 auto; position:relative; z-index:30; background:var(--bg);
+    padding:0 12px; display:flex; align-items:center; gap:5px;
+    height:var(--titlebar-h); min-height:var(--titlebar-h);
+  }
+  .brand{display:flex; align-items:center; gap:8px; flex:0 0 auto; white-space:nowrap;
+    padding-right:14px; margin-right:3px}
+  .brand-logo{color:var(--claude); white-space:pre; line-height:.82; margin:0; font-size:8px}
+  .brand-name{font-weight:650; font-size:15px; letter-spacing:.2px; color:var(--text)}
+  /* 只有会话 Tab 条装在这条可横滚、两端渐隐的 strip 里（shrink-only，空时不占位）。
+     Home / + 在 strip 外面，所以永远清晰、不被遮罩吃掉边。 */
+  #tabstrip{flex:0 1 auto; min-width:0; display:flex; align-items:center;
+    overflow-x:auto; overflow-y:hidden; scrollbar-width:none;
+    -webkit-mask-image:linear-gradient(to right,transparent 0,#000 10px,#000 calc(100% - 10px),transparent 100%);
+            mask-image:linear-gradient(to right,transparent 0,#000 10px,#000 calc(100% - 10px),transparent 100%);
+  }
+  #tabstrip:not(:has(.ktab)){margin:0; -webkit-mask-image:none; mask-image:none}
+  #tabstrip::-webkit-scrollbar{height:0; width:0}
+  #tablist{display:flex; align-items:center; gap:3px; min-width:0}
+  /* 会话 Tab：无边框、无下划线。状态只靠填充+文字色。 */
+  .ktab{
+    flex:0 0 auto; display:flex; align-items:center; gap:7px; height:30px;
+    max-width:200px; padding:0 7px 0 9px; border-radius:7px; cursor:pointer;
+    color:var(--faint); background:transparent; border:0;
+    transition:background-color .12s ease, color .12s ease, box-shadow .12s ease;
+  }
+  .ktab:hover{background:var(--ov-hover); color:var(--dim)}
+  .ktab[data-active="true"]{background:var(--panel); color:var(--text); box-shadow:var(--shadow)}
+  /* 首字母小方块：中性浅底（不描边、不用彩线） */
+  .ktab-av{flex:0 0 auto; width:17px; height:17px; border-radius:5px;
+    display:flex; align-items:center; justify-content:center;
+    background:var(--line); color:var(--dim);
+    font-size:10px; font-weight:700; text-transform:uppercase}
+  .ktab[data-active="true"] .ktab-av{background:var(--line2); color:var(--text)}
+  .ktab-t{min-width:0; flex:0 1 auto; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; font-size:12.5px; font-weight:500}
+  .ktab-x{flex:0 0 auto; width:18px; height:18px; border-radius:5px; border:0;
+    background:transparent; color:var(--faint); font-size:14px; line-height:1;
+    display:flex; align-items:center; justify-content:center; opacity:0;
+    transition:opacity .12s ease, background-color .12s ease, color .12s ease}
+  .ktab:hover .ktab-x, .ktab[data-active="true"] .ktab-x{opacity:1}
+  .ktab-x:hover{background:var(--bad-bg); color:var(--bad)}
+  /* Home / + 新建：同一套无边框图标钮，状态靠填充 */
+  #tab-home, #tab-new{
+    flex:0 0 auto; display:flex; align-items:center; justify-content:center;
+    height:30px; border-radius:7px; cursor:pointer;
+    color:var(--dim); background:transparent; border:0;
+    transition:background-color .12s ease, color .12s ease, box-shadow .12s ease;
+  }
+  #tab-home{width:32px}
+  #tab-new{width:30px}
+  #tab-home:hover, #tab-new:hover{background:var(--ov-hover); color:var(--text)}
+  #tab-home[data-active="true"]{background:var(--panel); color:var(--text); box-shadow:var(--shadow)}
+  #tab-home .ico, #tab-new .ico{width:15px; height:15px}
+  .tb-right{flex:0 0 auto; display:flex; align-items:center; gap:8px; margin-left:auto}
+  /* 版本 pill：无边框，极淡文字（OpenCode 自己不显版本，这是按需求的克制加法） */
+  .verpill{color:var(--faint); font-size:11px; letter-spacing:.3px;
+    padding:2px 6px; border-radius:6px; border:0; background:transparent;
+    white-space:nowrap; font-variant-numeric:tabular-nums}
+  .verpill:empty{display:none}
+  /* Tab 条。两个按钮本身不写任何东西（跟 `+ 新建` 一样只切显示），而且它们长在
+     header 里 —— 既不在 rsi Tab 的子树里，也不在 kore Tab 的子树里，所以按域分区的
+     结构断言不会被这两个钮污染。 */
+  .tabs{flex:0 0 auto; display:flex; gap:4px; padding:2px; border-radius:var(--r-sm);
+        background:var(--panel2); border:1px solid var(--line)}
+  .tabbtn{
+    border:1px solid transparent; background:transparent; color:var(--dim);
+    border-radius:6px; padding:3px 12px; font-size:12px; font-weight:600;
+    display:flex; align-items:baseline; gap:6px; white-space:nowrap;
+  }
+  .tabbtn:hover:not(.on){background:var(--panel); border-color:var(--line)}
+  .tabbtn.on{background:var(--panel); color:var(--text); border-color:var(--edge);
+             box-shadow:var(--shadow)}
+  /* 每个 Tab 自己的元信息带：它长在自己那个 pane 的子树里（是 #pane-rsi / #pane-kore 的第一个
+     孩子），不在 <header> 里，也不带 `.on` —— 显隐由祖先 pane 的 display:none 决定，不由
+     showTab() 决定。于是「run 切换器只在 rsi Tab 出现」是一条关于文件结构的断言：切换器在
+     #pane-rsi 子树里，grep 得到。 */
+  .hslot{flex:0 0 auto; min-width:0; min-height:36px; display:flex; align-items:center;
+         gap:14px; padding:6px 16px; background:transparent}
+  /* 元信息胶囊。全部可收缩：窄窗口时先挤胶囊内的文字，不许把顶栏顶破 ——
+     顶栏 overflow 是看不见的，只会把 goal 裁掉。 */
+  .caps{flex:0 1 auto; min-width:0; display:flex; align-items:center; gap:6px}
+  .caps .pill{flex:0 1 auto}
+  .goal{flex:1; min-width:0; display:flex; align-items:center; gap:12px}
+  .goal-obj{
+    flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    font-weight:500;
+  }
+  .goal-none{color:var(--faint); font-weight:400}
+  .phase{
+    flex:0 0 auto; padding:2px 9px; border-radius:var(--r-sm); font-size:11px; font-weight:600;
+    border:1px solid transparent;
+  }
+  .phase.active  {background:var(--ok-bg);   color:var(--ok);   border-color:var(--ok-line)}
+  .phase.blocked {background:var(--bad-bg);  color:var(--bad);  border-color:var(--bad-line)}
+  .phase.paused  {background:var(--busy-bg); color:var(--busy); border-color:var(--busy-line)}
+  .phase.complete{background:var(--idle-bg); color:var(--idle); border-color:var(--idle-line)}
+  .rounds{flex:0 0 auto; display:flex; align-items:center; gap:8px; color:var(--dim); font-size:11px}
+  .bar{width:110px; height:5px; border-radius:3px; background:var(--line); overflow:hidden}
+  .bar>i{display:block; height:100%; background:var(--accent); border-radius:3px}
+  .tick{flex:0 0 auto; color:var(--faint); font-size:11px; text-align:right; white-space:nowrap}
+  /* session switcher: the board used to silently pin itself to whatever session
+     it picked first. Now the choice is visible and changeable.
+     appearance:none 是为了自己画 ⌄（原生箭头会被胶囊裁掉）；max-width 用 min(px,vw)
+     而不是死 px：窄窗口先挤 session 标签，别去挤顶栏里最该看见的 objective。 */
+  select.sw{
+    flex:0 1 auto; width:auto; max-width:min(300px,17vw); min-width:0;
+    font-size:11.5px; padding:2px 0; text-overflow:ellipsis;
+    appearance:none; -webkit-appearance:none;
+    background:transparent; border:0; border-radius:6px; color:var(--dim); cursor:pointer;
+  }
+  .pill-sel{cursor:pointer}
+  .pill-sel::after{
+    content:''; flex:0 0 auto; width:5px; height:5px; margin:0 1px 3px 2px;
+    border-right:1.3px solid var(--faint); border-bottom:1.3px solid var(--faint);
+    transform:rotate(45deg);
+  }
+  /* 换肤前是 flex:0 0 auto + nowrap：加了三个胶囊后窄窗口会把 goal 挤没。改成可
+     收缩 + 省略号（全文进 title），警告本身一个字都没少。 */
+  .stale{flex:0 1 auto; min-width:0; font-size:11px; color:var(--busy);
+         white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+
+  /* ── layout ───────────────────────────────────────────
+     换肤把「边到边的深色面板 + 分隔线」改成「灰白底上的白卡片 + 留白」。
+     两个 Tab 各是一块 `.tab-pane`，只有带 `.on` 的那一块显示。
+     2026-10-16 观察 Tab 重做成「rsi run 深度检视台」。2026-10-19 布局重设计（owner 拍「对话 +
+     右检视栏」）：main 两列 —— 左 .run-wrap 主角（transcript 吃满高度），右 .rsi-rail 检视栏
+     定宽竖排三卡（技能库 / 引擎 / 底座），如实映射 rsi agent 的真身：它长出了哪些技能、由什么
+     MCP/tools 固定构成、循环转到第几轮（适应度 phase 3 前诚实标未接）。原来底部那条 268px 的
+     footer 三卡会把活 transcript 挤掉一大截；迁进右侧栏后 transcript 拿回全部高度、检视降为侧栏，
+     底座（本会话固定、极少看）默认折叠。两个 Tab 的 main 都 .last 收底边（footer 已退役）。 */
+  .tab-pane{display:none}
+  .tab-pane.on{flex:1; min-height:0; display:flex; flex-direction:column}
+  main{flex:1; min-height:0; display:flex; gap:var(--gap); padding:var(--gap) var(--gap) 0}
+  main.last{padding-bottom:var(--gap)}
+  .run-wrap{flex:1; min-width:0; display:flex; flex-direction:column}
+  /* 单 run transcript 头：objective 已在顶栏 #o-goal，这里放 goal_id / 用时 / 资产 / 停因 / note。 */
+  .run-head{flex:0 0 auto; padding:6px 14px; border-bottom:1px solid var(--line);
+            color:var(--dim); font-size:11px; line-height:1.6}
+  .run-head .rh-warn{color:var(--bad)}
+  /* 右检视栏：定宽竖排，不抢 transcript 的弹性（.run-wrap flex:1 吃剩下的全部宽）。 */
+  .rsi-rail{flex:0 0 300px; min-width:0; display:flex; flex-direction:column; gap:var(--gap)}
+  /* 栏内三卡竖排、分纵向空间：技能库稍高（RSI 产出读数），引擎次之，底座折叠时只占标题高。
+     min-width:240px 留着当窄屏复位前的下限（和下面媒体查询那条配套），栏宽 300 容得下。 */
+  .pane-col{flex:1; min-width:240px; min-height:0; display:flex; flex-direction:column}
+  .pane-col.skills{flex:1.3; min-width:260px}
+  .pane-col.engine{flex:1; min-width:240px}
+  .pane-col.base{flex:1; min-width:240px}
+  /* 底座折叠：只占标题高、藏起 .scroll；标题整条可点，caret 指示开合（▾ 开 / ▸ 合）。 */
+  .pane-col.base.collapsed{flex:0 0 auto}
+  .pane-col.base.collapsed>.scroll{display:none}
+  .pane-col.base>.ttl{cursor:pointer; user-select:none}
+  .pane-col.base .caret{display:inline-block; width:5px; height:5px; margin:0 3px 2px 0;
+    border-right:1.3px solid var(--faint); border-bottom:1.3px solid var(--faint);
+    transform:rotate(45deg); transition:transform .12s}
+  .pane-col.base.collapsed .caret{transform:rotate(-45deg)}
+  /* kore Tab：kore sessions 列表吃满整屏弹性（新建表单 + roster）。2026-10-19 域轴重构后
+     这一屏只剩这一块 —— 原先并排的 RSI 对话卡（.jobwrap）已整体迁进 rsi Tab，
+     .jobwrap 规则现在是死 CSS（markup 里不再有 .jobwrap，下面媒体查询里的残留选择器
+     匹配不到任何元素，无害，留着以免动逗号列表）。 */
+  .kwrap{flex:1; min-width:0; display:flex; flex-direction:column}
+  .jobwrap{flex:0 0 372px; min-width:0; display:flex; flex-direction:column}
+  /* 卡片：白底 + 1px hairline + 极淡阴影 + 12px 圆角，不用重边框（参考图 05/06）。
+     样式与弹性分开：`.card` 只管长相，flex 挡位在上面各自的类里。 */
+  /* 卡片：不描边。用「0.5px 全周淡环 + 柔和投影」抬起来（抄 OpenCode 的 elevation——
+     环是**整圈**、近乎中性的极淡黑，不是某一边的线，也不是彩线）。 */
+  .card{
+    background:var(--panel); border-radius:var(--r);
+    box-shadow:0 0 0 .5px rgba(17,24,39,.06), var(--shadow); overflow:hidden;
+  }
+  /* 面板标题：参考图的「插件 / 添加和管理插件」那种中等字重深色标题 + 灰色计数，
+     不再是全大写的运维面板小标签。 */
+  .ttl{
+    flex:0 0 auto; padding:11px 16px 10px; font-size:13px; font-weight:600;
+    letter-spacing:0; color:var(--text); border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:8px;
+  }
+  .ttl .n{color:var(--faint); font-weight:400; font-size:11.5px; letter-spacing:0}
+  /* 底座卡标题里「本会话固定」这类诚实子标：比标题轻、比计数醒目，点不动（纯声明） */
+  .ttl .muted{color:var(--dim); font-weight:400; font-size:11px; letter-spacing:0;
+              border:1px solid var(--line); border-radius:5px; padding:1px 6px}
+  /* 手动刷新钮（见 markup 处注释）：平时读缓存秒回，点它才真重扫；转圈只在重扫那一下 */
+  #c-refresh{display:inline-flex; align-items:center; gap:5px}
+  #c-refresh svg{width:13px; height:13px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
+  #c-refresh.spin svg{animation:paneSpin .8s linear infinite; transform-origin:center}
+  .scroll{flex:1; min-height:0; overflow:auto}
+  /* 空态：参考图的留白量级。An empty panel must say why it is empty (plan §5-3). */
+  .empty{padding:44px 24px; color:var(--faint); text-align:center; font-size:12px}
+  .empty b{display:block; color:var(--text); font-weight:600; font-size:13.5px; margin-bottom:9px}
+  .empty .why{display:inline-block; max-width:560px; text-align:left; line-height:1.7; color:var(--dim)}
+
+  /* ── data-supply strip: the standing answer to "why is that view blank" ── */
+  .diag{
+    flex:0 0 auto; border-top:1px solid var(--line); background:var(--panel2);
+    padding:9px 16px; font-size:11px; color:var(--faint); line-height:1.9;
+  }
+  .diag b{color:var(--dim); font-weight:600}
+  .diag .z{color:var(--busy)}
+  /* 每个事件家族一枚淡底胶囊，0 的那几个挂「未验证」徽章 */
+  .diag .c{
+    display:inline-block; margin:0 4px 0 0; padding:1px 8px; border-radius:6px;
+    background:var(--panel); border:1px solid var(--line);
+  }
+  .diag .hd{color:var(--text); font-weight:600; margin-right:6px}
+  .diag .why{margin-top:5px; color:var(--dim); line-height:1.7}
+
+  /* ── event timeline ───────────────────────────────── */
+  .ev{
+    display:flex; gap:9px; padding:4px 16px; border-bottom:1px solid var(--line2);
+    align-items:baseline; font-size:11.5px;
+  }
+  .ev:hover{background:var(--panel2)}
+  .ev .t{flex:0 0 58px; color:var(--faint); font-family:ui-monospace,Menlo,Consolas,monospace}
+  /* 事件种类徽章：参考图「实验性」那种淡底 + 深色字，不描边 */
+  .ev .k{
+    flex:0 0 66px; font-size:10px; font-weight:600; text-align:center;
+    border:1px solid transparent; border-radius:5px;
+    background:var(--panel2); color:var(--dim);
+  }
+  .ev .l{flex:0 0 auto; max-width:230px; overflow:hidden; text-overflow:ellipsis;
+         white-space:nowrap; font-weight:600}
+  .ev .d{flex:1; min-width:0; color:var(--dim); overflow:hidden;
+         text-overflow:ellipsis; white-space:nowrap}
+  .ev.bad .l{color:var(--bad)}
+  .ev.k-user .k{color:var(--idle); background:var(--idle-bg)}
+  .ev.k-assistant .k{color:var(--accent); background:var(--accent-bg)}
+  .ev.k-tool .k{color:var(--ok); background:var(--ok-bg)}
+  .ev.k-retry .k{color:var(--bad); background:var(--bad-bg)}
+  .ev.k-turn{background:var(--accent-wash)}
+  .ev.k-turn .k{color:var(--accent); background:var(--accent-bg)}
+
+  /* ── rsi 底座镜像：技能库 / 底座 / 引擎（2026-10-17，替代退役的 gate verdicts CSS）── */
+  /* 技能库：一条 = 一个学到的可复用能力 */
+  .sk{padding:10px 16px; border-bottom:1px solid var(--line2)}
+  .sk:hover{background:var(--panel2)}
+  .sk-h{display:flex; align-items:baseline; gap:7px}
+  .sk-name{font-size:12.5px; font-weight:600; color:var(--text); word-break:break-word}
+  .sk-dir{font-size:10.5px; color:var(--faint); font-family:ui-monospace,Menlo,Consolas,monospace}
+  .sk-desc{margin-top:4px; font-size:11.5px; color:var(--dim); line-height:1.55; word-break:break-word}
+  .sk-meta{margin-top:5px; font-size:10.5px; color:var(--faint)}
+  /* 底座：key/value 行 + 工具/MCP 名的小 chip */
+  .bs-row{display:flex; gap:10px; padding:8px 16px; border-bottom:1px solid var(--line2); font-size:11.5px}
+  .bs-k{flex:0 0 58px; color:var(--faint); font-weight:600}
+  .bs-v{flex:1; min-width:0; display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center;
+        color:var(--dim); word-break:break-word}
+  .bs-chip{font-size:10.5px; color:var(--dim); border:1px solid var(--line); border-radius:5px;
+           padding:1px 6px; font-family:ui-monospace,Menlo,Consolas,monospace}
+  .bs-none{color:var(--faint)}
+  .bs-note{padding:8px 16px; font-size:11px; color:var(--faint); line-height:1.55; word-break:break-word}
+  /* 引擎：适应度诚实旗标 —— 未接时是中性灰（不是红/绿假信号），接上后转绿 */
+  .eng-fit{margin:10px 16px; padding:8px 10px; border-radius:var(--r-sm); border:1px solid}
+  .eng-fit.pending{color:var(--dim); border-color:var(--edge); background:var(--panel2)}
+  .eng-fit.wired{color:var(--ok); border-color:var(--ok-line); background:var(--ok-bg)}
+  .eng-fit-h{font-size:11.5px; font-weight:600}
+  .eng-fit-note{margin-top:5px; font-size:11px; line-height:1.55; color:var(--faint); word-break:break-word}
+
+  /* ── RSI loop 相位徽章 ───────────────────────────────
+     三态配色自成一套（在跑 busy / 待命 idle / 已收尾 绿 / 最后已知·未记录 灰），不依赖别的卡。
+     2026-10-16：旧的「观察 loop run 列表」退役后，这套 .lp-fin 相位徽章改由
+     renderRunHead（观察的选中 run 头）复用——只读、无按钮。 */
+  .lp{padding:11px 16px; border-bottom:1px solid var(--line2)}
+  .lp-h{display:flex; align-items:baseline; gap:7px; font-size:11px}
+  .lp-id{font-weight:600; color:var(--text); font-family:ui-monospace,Menlo,Consolas,monospace}
+  .lp-fin{font-size:10px; padding:1px 7px; border-radius:6px; border:1px solid}
+  .lp-fin.done{color:var(--ok); border-color:var(--ok-line); background:var(--ok-bg)}
+  .lp-fin.on{color:var(--busy); border-color:var(--busy-line); background:var(--busy-bg)}
+  .lp-fin.off{color:var(--dim); border-color:var(--line)}
+  .lp-fin.idle{color:var(--idle); border-color:var(--idle-line); background:var(--idle-bg)}
+  .lp-fin.none{color:var(--faint); border-color:var(--line)}
+  .lp-c{margin-left:auto; color:var(--faint); white-space:nowrap}
+  .lp-obj{margin-top:6px; font-size:11.5px; color:var(--dim); line-height:1.6}
+  .lp-why{margin-top:5px; font-size:11px; color:var(--busy); word-break:break-word}
+  .lp-meta{margin-top:6px; font-size:10.5px; color:var(--faint)}
+
+  /* ── DAG ──────────────────────────────────────────── */
+  #dag{width:100%; height:100%; display:block}
+  .node-box{fill:var(--panel2); stroke:var(--line); rx:10}
+  .node-box.done   {stroke:var(--ok)}
+  .node-box.running{stroke:var(--busy)}
+  .node-box.blocked{stroke:var(--bad)}
+  .node-t{fill:var(--text); font-size:12px; font-weight:600}
+  .node-s{fill:var(--dim); font-size:10px}
+  .edge{stroke:var(--edge); stroke-width:1.4; fill:none; marker-end:url(#o-ar)}
+  /* 箭头颜色跟着 --edge 走：换肤前它是写死在 <marker> 里的深色 hex */
+  #o-ar path{fill:var(--edge)}
+
+  /* ── kore sessions ──────────────────────────────────────
+     行式布局照参考图 07 的插件列表：状态点 | 名字 + 徽章 | 灰色描述行 | 操作。
+     行之间只留极浅分隔线，靠留白分组。 */
+  /* 2026-10-13 owner：行=巡检卡，主操作是打开终端 —— 整行可点进 pane（不止一颗钮）。 */
+  .k-row{padding:12px 16px; cursor:pointer}
+  .k-row:hover{background:var(--ov-hover)}
+  .k-row.protected{background:var(--accent-wash)}
+  /* 键盘高亮（R7FIX-3 任务三）。左边一条实线 + 浅底，和 .protected 的底色可以叠加而不
+     互相吃掉；#c-list 自己拿焦点，所以 outline 画在行上而不是容器上。 */
+  .k-row.sel{background:var(--line2)}
+  #c-list:focus{outline:none}
+  #c-list:focus .k-row.sel{background:var(--line)}
+  .k-h{display:flex; align-items:center; gap:7px}
+  /* 状态点：owner「busy 跟 idle 都灰糊糊的，没区分度」。所以两条线一起拉开 ——
+     颜色（idle 稳定蓝 / busy 暖琥珀）+ 形态（busy 多一圈呼吸的光晕，idle 不动）。
+     光晕动的是 ::after 的 transform/opacity（只上合成器、不触发重排/重绘），一行一个、
+     roster 就那么几个，常开无妨；颜色沿用主题 var() 所以深浅主题各自对。 */
+  .dot{width:8px; height:8px; border-radius:50%; flex:0 0 auto; position:relative}
+  .dot.idle{background:var(--idle); box-shadow:0 0 0 2px var(--idle-bg)}
+  .dot.busy{background:var(--busy)}
+  .dot.busy::after{content:''; position:absolute; inset:0; border-radius:50%;
+    border:1.5px solid var(--busy); animation:dotPulse 1.6s ease-out infinite}
+  @keyframes dotPulse{0%{transform:scale(1);opacity:.7} 100%{transform:scale(2.4);opacity:0}}
+  .dot.dead{background:var(--bad); box-shadow:0 0 0 2px var(--bad-bg)}
+  .dot.tmux_only{background:var(--edge)}
+  /* 2026-10-13：操控区不轮询 roster（读缓存+手动刷新），屏上这批状态会一直变旧。年龄过线后
+     把点变淡、并停掉 busy 的呼吸光晕 —— 一个还在喘的 busy 点配一份两分钟前的快照，是页面在
+     说假话。变淡=「这是旧的，别当此刻」，由 renderK 的年龄计时器 toggle #c-list.stale-age。*/
+  #c-list.stale-age .dot{opacity:.45}
+  #c-list.stale-age .dot.busy::after{animation:none; display:none}
+  .k-n{font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .k-tag{
+    margin-left:auto; flex:0 0 auto; font-size:10px; color:var(--dim);
+    background:var(--panel2); border:0; border-radius:5px;
+    padding:2px 7px; white-space:nowrap;
+  }
+  .k-tag.lock{color:var(--accent); background:var(--accent-bg); border-color:var(--accent-line)}
+  /* 2026-10-13 owner：星标取代注册表那种「精选子集」—— 点亮=置顶。右端一颗描边星，
+     亮起来填成金色。只持久化在 localStorage，不进任何服务端状态。 */
+  .k-star{
+    flex:0 0 auto; width:24px; height:24px; margin:-3px -4px -3px 0; padding:0;
+    display:inline-flex; align-items:center; justify-content:center;
+    border:0; background:none; cursor:pointer; color:var(--faint); border-radius:6px;
+  }
+  .k-star:hover{background:var(--panel2); color:var(--text)}
+  .k-star svg{width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linejoin:round}
+  .k-star.on{color:#e0a92e}
+  .k-star.on svg{fill:currentColor}
+  /* 2026-10-13 owner：杀挪到列表行上。这环境原生 window.confirm 被吞（一点就当取消），所以
+     不靠弹窗，改页内两步确认（见 kKillClick）：静息是一颗描边垃圾桶，待命态整颗变红底白字
+     「确认杀」—— 强到不可能误读，再点一次才真杀。 */
+  .k-kill{
+    flex:0 0 auto; width:24px; height:24px; margin:-3px 0; padding:0;
+    display:inline-flex; align-items:center; justify-content:center;
+    border:0; background:none; cursor:pointer; color:var(--faint); border-radius:6px;
+  }
+  .k-kill:hover{background:var(--bad-bg); color:var(--bad)}
+  .k-kill svg{width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linejoin:round}
+  .k-kill.arm{width:auto; padding:0 8px; background:var(--bad); color:#fff; font-size:11px; font-weight:600}
+  .k-kill.arm:hover{background:var(--bad); color:#fff}
+  .k-m{color:var(--dim); font-size:11px; margin-top:4px; word-break:break-all}
+  /* 行高从 1.5 提到 1.55 后，46px 正好把第三行切成两半：抬到 52px 让 line-clamp 自己收尾 */
+  .k-s{
+    color:var(--faint); font-size:11px; margin-top:6px; max-height:52px; overflow:hidden;
+    display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; white-space:pre-wrap;
+  }
+  /* 次按钮：白底 + 1px 浅灰描边（参考图「添加 API Key」/「去充值」） */
+  button{
+    font:inherit; font-size:11.5px; color:var(--text); background:var(--panel);
+    border:1px solid var(--line); border-radius:var(--r-sm); padding:4px 10px; cursor:pointer;
+  }
+  button:hover:not(:disabled){background:var(--panel2); border-color:var(--edge)}
+  button:disabled{opacity:.45; cursor:not-allowed}
+  /* 主按钮：纯黑底白字，无渐变无阴影（参考图「登录」/「继续」/「+ 添加插件」）。
+     只给「确认这一步」的按钮用，工具条上的读操作一律走次按钮。 */
+  button.primary{background:var(--btn); border-color:var(--btn); color:var(--btn-text)}
+  button.primary:hover:not(:disabled){background:var(--btn-hover); border-color:var(--btn-hover)}
+  /* 「起」待命确认态：整颗变红「确认起」，和停/杀的待命同配色（见 k-kill.arm）。 */
+  button.primary.arm, button.primary.arm:hover:not(:disabled){
+    background:var(--bad); border-color:var(--bad); color:#fff; font-weight:600}
+  button.danger:hover:not(:disabled){
+    border-color:var(--bad-line); background:var(--bad-bg); color:var(--bad);
+  }
+  input, select, textarea{
+    font:inherit; font-size:12px; color:var(--text); background:var(--panel);
+    border:1px solid var(--line); border-radius:var(--r-sm); padding:7px 10px; width:100%;
+  }
+  /* 聚焦：中性反馈 —— 不用彩色描边、不用彩色辉光，只把边框压深一档 + 一圈中性柔环。 */
+  input:focus, select:focus, textarea:focus{
+    outline:none; border-color:var(--edge); box-shadow:0 0 0 3px var(--line2);
+  }
+  input::placeholder{color:var(--faint)}
+  /* 新建会话表单：卡中卡——一块圆角浅底的内嵌面板，不描边、不用分隔线，靠留白与填充分区。 */
+  .form{display:none; margin:4px 14px 14px; padding:14px 16px;
+        background:var(--panel2); border-radius:var(--r)}
+  .form.open{display:block}
+  .form label{display:block; color:var(--dim); font-size:11.5px; font-weight:500; margin:12px 0 5px}
+  .form > label:first-child{margin-top:0}
+  .k-btns{display:flex; gap:8px; margin-top:16px}
+  .k-btns button{padding:7px 16px; font-size:12px}
+  .jobs{padding:8px 16px; font-size:11px; color:var(--dim)}
+  .job{display:flex; gap:6px; padding:3px 0; align-items:baseline}
+  .job .st{flex:0 0 auto; font-weight:600}
+  .job .st.done{color:var(--ok)} .job .st.failed{color:var(--bad)}
+  .job .st.running,.job .st.queued{color:var(--busy)}
+  .job .msg{color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+
+  /* ── RSI loop 入口（操控右栏；2026-10-13 owner 授权板子能起 loop）──
+     goal 编辑器复用 .form（默认收起、.open 展开），和「新建 session」那个表单同一套。
+     goal JSON 用等宽文本域（原始 JSON 最灵活，契合「自定义」）。监控行是只读的，读
+     /api/loop/runs 的 heartbeat 画「第几轮 / 哪个 phase / 在不在跑」。 */
+  .form textarea.goaljson{width:100%; box-sizing:border-box; resize:vertical;
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; line-height:1.5;
+    color:var(--text); background:var(--panel); border:1px solid var(--line);
+    border-radius:8px; padding:8px 10px; min-height:160px}
+  .form textarea.goaljson:focus{outline:none; border-color:var(--accent)}
+  .lp-run{display:flex; gap:6px; padding:4px 0; align-items:baseline; font-size:11px;
+    border-bottom:1px solid var(--line)}
+  .lp-run:last-child{border-bottom:0}
+  .lp-run .id{flex:0 0 auto; color:var(--text);
+    font-family:ui-monospace,Menlo,Consolas,monospace}
+  .lp-run .ph{flex:0 0 auto; font-weight:600}
+  .lp-run .ph.on{color:var(--busy)} .lp-run .ph.off{color:var(--dim)}
+  .lp-run .ph.done{color:var(--ok)} .lp-run .ph.none{color:var(--faint)}
+  /* 待命 = 这轮跑完了、session 还活着、在等你追加（蓝，和「在跑」的琥珀分得开）。 */
+  .lp-run .ph.idle{color:var(--idle)}
+  .lp-run .m{flex:1; min-width:0; color:var(--dim); overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap}
+  /* 停钮：静息时低调（dim 边框），待命时整颗变红「确认停」—— 和 k-kill.arm 同配色 */
+  .lp-stop{flex:0 0 auto; border:1px solid var(--line); background:transparent;
+    color:var(--dim); font-size:11px; padding:0 7px; border-radius:3px; cursor:pointer}
+  .lp-stop:hover{border-color:var(--bad); color:var(--bad)}
+  .lp-stop.armed{background:var(--bad); color:#fff; border-color:var(--bad); font-weight:600}
+  .lp-stop.armed:hover{background:var(--bad); color:#fff}
+  /* 追加钮：和停钮一个块头，静息低调；点开它才露出下面的 composer。发 = 又放一轮自主
+     工作，所以也走两步（亮蓝「确认发」）—— 和「起」同级分量。2026-10-15。 */
+  .lp-add{flex:0 0 auto; border:1px solid var(--line); background:transparent;
+    color:var(--dim); font-size:11px; padding:0 7px; border-radius:3px; cursor:pointer}
+  .lp-add:hover{border-color:var(--idle); color:var(--idle)}
+  .lp-add.open{border-color:var(--idle); color:var(--idle); font-weight:600}
+  .lp-send{display:flex; gap:6px; padding:2px 0 6px; align-items:flex-start}
+  .lp-send textarea{flex:1; min-width:0; min-height:34px; resize:vertical;
+    font:inherit; font-size:11px; border:1px solid var(--line); border-radius:4px;
+    padding:4px 6px; background:var(--line2); color:var(--text)}
+  .lp-send button{flex:0 0 auto; border:1px solid var(--idle); background:transparent;
+    color:var(--idle); font-size:11px; padding:0 9px; border-radius:3px; cursor:pointer}
+  .lp-send button.armed{background:var(--idle); color:#fff; font-weight:600}
+  /* 「看」钮：和停/追加一个块头，静息低调；展开 trace 面板时整颗点亮（文字变「收」）。 */
+  .lp-see{flex:0 0 auto; border:1px solid var(--line); background:transparent;
+    color:var(--dim); font-size:11px; padding:0 7px; border-radius:3px; cursor:pointer}
+  .lp-see:hover{border-color:var(--text); color:var(--text)}
+  .lp-see.open{border-color:var(--text); color:var(--text); font-weight:600}
+  /* trace 面板：一个 run 的只读时间线（agent 发言 + 工具链），限高滚动、钉底看最新。 */
+  .lp-trace{max-height:300px; overflow-y:auto; margin:2px 0 8px; padding:6px 8px;
+    border:1px solid var(--line); border-radius:4px; background:var(--line2);
+    font-size:11px; line-height:1.5}
+  .tr-ev{display:flex; gap:6px; align-items:baseline; padding:1px 0}
+  .tr-t{flex:0 0 auto; color:var(--faint);
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:10px}
+  .tr-b{flex:1; min-width:0; white-space:pre-wrap; word-break:break-word}
+  .tr-ip{flex:0 0 auto; max-width:45%; color:var(--dim); overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap;
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:10px}
+  .tr-agent .tr-b{color:var(--text)}
+  .tr-you .tr-b{color:var(--idle); font-weight:600}
+  .tr-tool .tr-b{color:var(--busy)}
+  .tr-sys{color:var(--faint)}
+  .tr-sys-ev{justify-content:center}
+
+  /* 2026-10-19 transcript 按轮分组：每轮一块，轮头 sticky 留顶、点它折叠整块；块体里工具调用
+     再折一层（默认收起、点开才列），避免满屏 ⚙ 工具噪声。最新一块默认展开、历史块默认收起。 */
+  .tr-grp{border-top:1px solid var(--line); margin-top:2px}
+  .tr-grp:first-child{border-top:0; margin-top:0}
+  .tr-ghead{position:sticky; top:0; z-index:1; display:flex; gap:6px; align-items:baseline;
+    padding:4px 2px; background:var(--panel); cursor:pointer; user-select:none;
+    font-weight:600; color:var(--text)}
+  .tr-gcar{flex:0 0 auto; color:var(--faint); font-size:10px; width:9px}
+  .tr-gttl{flex:1; min-width:0}
+  .tr-gbody{padding:2px 0 6px 9px}
+  .tr-grp.collapsed .tr-gbody{display:none}
+  .tr-tools{margin-top:2px}
+  .tr-tfold{cursor:pointer; user-select:none; color:var(--busy); font-size:11px; padding:1px 0}
+  .tr-tlist{padding-left:8px; border-left:1px solid var(--line2); margin:2px 0}
+  .tr-tools:not(.open) .tr-tlist{display:none}
+  .tr-report{margin-top:3px; color:var(--dim); white-space:pre-wrap; word-break:break-word;
+    border-left:2px solid var(--line); padding-left:8px}
+  /* 轮的盘上增量（2026-10-20）：轮前 sha → 轮后 sha + git diff --stat。一轮没改动盘上任何
+     文件时这块诚实地这么说，而不是留白让人以为没数据。 */
+  .tr-delta{margin:2px 0 3px; color:var(--dim); font-size:11px; white-space:pre-wrap;
+    word-break:break-all}
+  .tr-delta .tr-sha{color:var(--text); font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+
+  /* ── RSI session 聊天版（2026-10-16）：顶 chip 行 + 中对话流 + 底撰写框 ──
+     原来「输入在上 / run 列表 / 每行折叠 trace / 另一个最近写操作框」读着像批处理监视器，
+     owner 要「多轮对话框」的感觉：convo 吃弹性居中、撰写框钉底、chip 切 run。 */
+  .lp-chips{flex:0 0 auto; display:flex; flex-wrap:wrap; gap:6px; padding:8px 16px;
+    border-bottom:1px solid var(--line)}
+  .lp-chip{display:inline-flex; align-items:center; gap:5px; cursor:pointer; font-size:11px;
+    border:1px solid var(--line); border-radius:999px; padding:3px 10px;
+    color:var(--dim); background:transparent}
+  .lp-chip:hover{border-color:var(--idle-line); color:var(--text)}
+  .lp-chip.sel{border-color:var(--accent); color:var(--accent); background:var(--accent-wash)}
+  .lp-chip.new{color:var(--idle); border-style:dashed}
+  .lp-chip .q{color:var(--busy); font-weight:600}
+  .lp-convo{flex:1; min-height:120px; padding:8px 16px; background:var(--panel)}
+  /* 对话顶 header：goal + phase 徽章 + 活 run 的「停」钮 */
+  .lp-chead{display:flex; align-items:baseline; gap:8px; padding:0 0 6px; margin-bottom:6px;
+    border-bottom:1px solid var(--line2)}
+  .lp-chead .g{flex:1; min-width:0; color:var(--dim); font-size:11px; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap}
+  .lp-chead .ph{flex:0 0 auto; font-weight:600; font-size:11px}
+  .lp-chead .ph.on{color:var(--busy)} .lp-chead .ph.off{color:var(--dim)}
+  .lp-chead .ph.done{color:var(--ok)} .lp-chead .ph.idle{color:var(--idle)}
+  .lp-chead .ph.none{color:var(--faint)}
+  /* 撰写框钉底：和 kore 列表那套白底次按钮 / 黑主按钮同配色（主按钮 .arm = 红「确认」态） */
+  .lp-composer{flex:0 0 auto; border-top:1px solid var(--line); background:var(--panel2);
+    padding:10px 16px}
+  .lp-composer textarea{width:100%; box-sizing:border-box; resize:vertical; min-height:48px;
+    font:inherit; font-size:12px; line-height:1.5; color:var(--text);
+    background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:7px 9px}
+  .lp-composer textarea:focus{outline:none; border-color:var(--accent)}
+  .lp-composer textarea:disabled{background:var(--line2); color:var(--faint); cursor:not-allowed}
+  .lp-composer-row{display:flex; align-items:center; gap:8px; margin-top:7px}
+  .lp-composer-row .k-m{flex:1; min-width:0; margin-top:0}
+
+  /* ── pane modal ───────────────────────────────────── */
+  .modal{
+    position:fixed; inset:0; background:var(--scrim); display:none;
+    align-items:center; justify-content:center; z-index:20; padding:24px;
+  }
+  .modal.open{display:flex}
+  .modal-box{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    box-shadow:var(--shadow-lg); overflow:hidden;
+    width:min(1100px,100%); max-height:100%; display:flex; flex-direction:column;
+  }
+  .modal-h{padding:12px 18px; display:flex;
+           align-items:center; gap:10px; font-weight:600}
+  .modal-b{flex:1; min-height:0; overflow:auto; padding:14px 18px; margin:0;
+           white-space:pre-wrap; font-family:ui-monospace,Menlo,Consolas,monospace;
+           font-size:11.5px; color:var(--text); background:var(--panel2)}
+  /* ROUND8：真终端的宿主。xterm 自己管滚动和字号（它按 cols×rows 排版，padding 会让
+     它算错可用宽度），所以这里只给它一个定高的黑底盒子，不给 padding、不给 overflow。
+     `display:none` 默认关着：xterm.js 加载不成功时它一个像素都不占，#c-pane-body 那个
+     <pre> 原样顶上去（降级路径，任务书验收线 D）。两者永远只有一个带 .on。
+     ROUND9 第二轮：字号固定、几何跟着盒子走（见 paneFitGeom），所以盒子和终端的尺寸
+     本来就只差不到一个字宽/字高 —— 居中仍然留着（那点余量平均分到两边比全堆在右下角
+     诚实），`overflow:auto` 是给**调不动的对面**留的：不可写的目标（或者 resize 被拒）
+     几何就还是对面那个 131×36，字号又不许再缩成 6px 去迁就它，所以多出来的部分必须能
+     滚出来看，不能被切掉。
+     2026-10-12：内边距挂在**里面那层 .xterm 上**，不挂在 #c-pane-term 上 —— 这是「浏览器
+     里看得见两层滚动条」的来源。量盒子用的是 fit addon 的 proposeDimensions，它拿
+     #c-pane-term 的 clientWidth/clientHeight（含内边距的那一块），却只把 `.xterm` 自己的
+     内边距减掉；挂在 #c-pane-term 上的 6/8/10px 于是被当成可用空间发给了对面，对面照着
+     多出来的格数画，终端就必然比内容框大那么十几个像素 —— 外面这层 overflow:auto 一定长
+     出一条滚动条，而里面 .xterm-viewport 的那条是 overflow-y:scroll、永远在。
+     overscroll-behavior:contain：滚到终端回看历史的尽头之后，不许把这一发滚动接着传给
+     外面那层（滚动链）。 */
+  #c-pane-term{display:none; background:#212121}  /* 2026-10-13 跟终端 Material Darker 底色一致，别让内边距/居中黑边露出纯黑 */
+  #c-pane-term .xterm{padding:6px 8px 0 10px}
+  /* 右边那条滚动条不画了（2026-10-12，owner：「右边那个滚动条 也很扎眼 是不是可以干掉」）。
+     它是 vendor 的 xterm.css 钉的：`.xterm-viewport{overflow-y:scroll}` —— scroll 而不是
+     auto，所以哪怕一行回看历史都没有，那条灰槽也一直在，而且它压在终端右边第一列上。
+     vendor 那个文件一个字节都不许改（版本和 sha256 都钉死了，见 vendor/xterm/VENDOR.md），
+     所以在这儿盖掉，而且只在这个弹窗里盖（`#c-pane-term` 开头）—— 观察 Tab 那边谁也没用
+     xterm。
+     干掉的是**那条槽**，不是滚动本身：overflow 还在（换成 auto），滚轮、拖选自动滚、
+     Shift+PageUp 全照旧，xterm 自己量 scrollBarWidth 的时候量到 0，于是那一列也还给了
+     正文。两个前缀是因为 scrollbar-width 是标准的（Firefox 支持），而 Chrome/Safari 到
+     今天还只认 ::-webkit-scrollbar。 */
+  #c-pane-term .xterm-viewport{overflow-y:auto; overscroll-behavior:contain;
+                               scrollbar-width:none; -ms-overflow-style:none}
+  #c-pane-term .xterm-viewport::-webkit-scrollbar{width:0; height:0}
+  /* 宿主默认**不是一个能滚的盒子**（2026-10-12，owner：「滑动的时候还是有点上下抖动，
+     不是 fix 住的」）。为什么会抖：宿主留着 overflow:auto 的时候，里面那层 .xterm 的高度
+     只要比内容框多出一两个像素（行高是分数像素，rows × lineHeight 取整之后基本一定会多
+     出来一点），宿主就成了第二个能滚的盒子 —— 而滚轮事件走的是**里面**那层 viewport，
+     滚到尽头那一下滚动链接着传给宿主，宿主就把整块终端上下挪那一两像素。看起来就是「终端
+     没钉住」。现在要滚的只有一个盒子：.xterm-viewport。
+     overscroll-behavior:contain 挂在 viewport 上，不挂在宿主上：滚动链是从**真正在滚的
+     那个盒子**开始传的，挂在宿主上只能挡住「宿主 → 整页」这一段，挡不住「viewport →
+     宿主」那一段，而后者正是上面那一下抖动。
+     `.scroll` 是给**装不下**的那种对面留的（只读目标 / resize 被拒：几何还是对面那个
+     131×36，字号又不许缩成 6px 去迁就它）。那时候多出来的部分必须能滚出来看，不能被切掉
+     —— 这一支里居中也得撤掉：flex 的居中会把溢出的那一半顶到盒子上边界**外面**，滚上去
+     是滚不到的。谁挂这个类见 paneSetGeom（本地终端改尺寸的唯一入口）。 */
+  #c-pane-term.on{display:flex; align-items:center; justify-content:center;
+                  flex:1; min-height:0; overflow:hidden; position:relative}
+  #c-pane-term.on.scroll{overflow:auto; align-items:flex-start; justify-content:flex-start}
+  /* 开 pane / 重订的头几帧先盖住终端,只露盒子的 #000 黑底 —— 不让人看见 prime 那张「对面
+     几秒前、而且是旧尺寸」的裸快照铺在盒子里(内容只填上半截、claude 的输入行悬在页面中间,
+     就是 owner 报的「输入框在页面中间不是最底下」;见 paneApplyTerm 里 f.prime 那段)。盖的是
+     里层 .xterm 用 visibility(不是 display:none):盒子的布局尺寸要留着给 FitAddon 量,量不出来
+     会退回对面旧几何。第一帧真内容(非 prime)落地、或兜底超时到点就揭,见 paneReveal。 */
+  #c-pane-term.on.sizing .xterm{visibility:hidden}
+  /* claude-code 启动 banner 那个方块 logo（owner 2026-10-12 贴来的真图）。两处复用：pane 头条
+     缀一个小的、加载屏放一个大的。珊瑚橙 = claude logo 本色，白底(头条)/黑底(加载屏)上都压得住。 */
+  .k-logo{color:var(--claude); white-space:pre; line-height:1; margin:0;
+     font-family:ui-monospace,Menlo,Consolas,monospace; user-select:none}
+  .modal-h .k-logo{font-size:7px; flex:0 0 auto}
+  /* 2026-10-13 owner：session 列表每行名字前缀一个同款小 logo（珊瑚身份标识，不是筛选位）。
+     7px 和 pane 头条同尺寸，克制、不喧宾夺主。 */
+  .k-h .k-logo{font-size:7px; flex:0 0 auto}
+  /* pane 头上那两颗（刷新/关闭）：原来是带方框的文字按钮，夹在 logo 旁边不协调。
+     改成安静的图标钮 —— 平时淡灰、无框无底，悬停才亮起一圈。刷新悬停时轻转一下
+     暗示「重连」，关闭悬停转危险红。触屏上(见下面 @media)放大到好按。 */
+  /* 图标是内联 SVG，不是 unicode 字形：⟳/✕ 这种字形自带的基线和字宽各字体不一样，
+     font-size 既压不正中心也定不准视觉大小（owner 2026-10-12：「icon 很小而且不居中」）。
+     SVG 用 viewBox 把尺寸和居中都钉死，再 stroke:currentColor 跟着 .ic 的 color 走，
+     所以下面那两条 hover 换色对描边同样生效。 */
+  /* 终端头上的两颗（重连/关闭）：幽灵图标钮 —— 无描边、无圆环，状态靠填充（抄 OpenCode）。 */
+  .modal-h .ic{
+    border:0; background:transparent; color:var(--dim);
+    width:28px; height:28px; padding:0; border-radius:8px;
+    display:inline-flex; align-items:center; justify-content:center;
+    cursor:pointer;
+    transition:background .12s ease, color .12s ease;
+  }
+  .modal-h .ic svg{width:14px; height:14px; display:block; fill:none;
+                   stroke:currentColor; stroke-width:2;
+                   stroke-linecap:round; stroke-linejoin:round}
+  .modal-h .ic:hover:not(:disabled){background:var(--ov-hover); color:var(--text)}
+  .modal-h .ic.x:hover:not(:disabled){background:var(--bad-bg); color:var(--bad)}
+  /* 额外按键条（Termux 式 extra-keys）：默认隐藏，只在手机 + 终端可写时出现（见 @media）。
+     它是 modal-box 末尾的 in-flow 弹性子项 —— 终端 flex:1 自动缩出它的高度，不覆盖内容。
+     顶上用柔和投影抬起（不是分隔线）。 */
+  /* 底部留白按 iOS HIG：尊重设备安全区（home indicator / 圆角），但浏览器没报安全区时
+     （env()=0）也兜一个最小基线，让按键永远不贴屏幕底边。左右同理（横屏刘海）。 */
+  /* 撰写框：底部一簇（撰写框 + 额外键条）的最上面，柔和投影抬起（不是线）。
+     左右吃安全区（横屏刘海）。原生输入框，输入法/语音/流式合成全交给系统。 */
+  #compose{
+    display:none; flex:0 0 auto; gap:8px; align-items:flex-end;
+    padding:9px max(10px, env(safe-area-inset-right, 0px)) 0 max(10px, env(safe-area-inset-left, 0px));
+    background:var(--panel); box-shadow:0 -8px 20px rgba(17,24,39,.07);
+  }
+  #compose-in{
+    flex:1 1 auto; min-width:0; width:auto; resize:none; max-height:104px;
+    border:0; border-radius:12px; background:var(--panel2); color:var(--text);
+    font-size:16px; line-height:1.4; padding:9px 13px; font-family:inherit;  /* 16px：避开 iOS 聚焦自动放大 */
+  }
+  #compose-in:focus{outline:none; box-shadow:0 0 0 3px var(--line2)}
+  #compose-in::placeholder{color:var(--faint)}
+  #compose-send{
+    flex:0 0 auto; width:40px; height:40px; border:0; border-radius:12px;
+    background:var(--claude); color:#fff; cursor:pointer;
+    display:inline-flex; align-items:center; justify-content:center;
+  }
+  #compose-send .ico{width:17px; height:17px; stroke-width:2.1}
+  #compose-send:active{filter:brightness(.94)}
+  #kbar{
+    display:none; flex:0 0 auto; gap:6px; align-items:center;
+    padding:8px max(10px, env(safe-area-inset-right, 0px))
+            max(12px, env(safe-area-inset-bottom, 0px))
+            max(10px, env(safe-area-inset-left, 0px));
+    background:var(--panel);
+    overflow-x:auto; overflow-y:hidden; scrollbar-width:none; -webkit-overflow-scrolling:touch;
+  }
+  #kbar::-webkit-scrollbar{height:0; width:0}
+  .kb{
+    flex:0 0 auto; min-width:38px; height:36px; padding:0 12px; border:0; border-radius:8px;
+    background:var(--panel2); color:var(--text); cursor:pointer;
+    font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace; font-size:13px; font-weight:600;
+    display:inline-flex; align-items:center; justify-content:center; user-select:none;
+    transition:background-color .1s ease, color .1s ease;
+  }
+  .kb:active{background:var(--line)}
+  /* 黏住的 Ctrl：珊瑚实底（填充，不是描边/线） */
+  .kb-mod[aria-pressed="true"]{background:var(--claude); color:#fff}
+  .kb-sep{flex:0 0 auto; width:10px}   /* 修饰键与方向键之间留一道空隙，不画线 */
+  /* 键盘弹出时：按键条紧贴键盘顶，底部只留一丢丢（不再叠 home-indicator 安全区）。 */
+  #c-pane-modal.kbd-up #kbar{padding-bottom:6px}
+  /* 刷新「进行中」：图标持续转，直到首帧真内容落地（paneReveal）或 settle 才停。旋转这个
+     强信号只留给真正的刷新动作（悬停不转，悬停只亮描边+底色）。转的是里面那枚 svg、
+     绕它自己中心转，外面那圈描边不跟着转。 */
+  .modal-h .ic.spin{color:var(--text)}
+  .modal-h .ic.spin svg{animation:paneSpin .8s linear infinite; transform-origin:center}
+  @keyframes paneSpin{from{transform:rotate(0)} to{transform:rotate(360deg)}}
+  /* 盖着的时候别是一片死黑(刷新要重 attach ~2.6s，纯黑看起来像坏了；owner 2026-10-12)——
+     放 claude 的方块 logo + 一句淡的「连接中…」。整层延迟 0.3s 才淡入：本地快开(几十毫秒就揭)
+     时它根本不露面、保持单调，只有刷新这种真要等的才浮出来。absolute + pointer-events:none：
+     不进盒子的量算(FitAddon 照常量)、也不挡选字。揭开(.sizing 撤)就 display:none。 */
+  #c-pane-loading{display:none}
+  #c-pane-term.on.sizing #c-pane-loading{position:absolute; inset:0; display:flex;
+     flex-direction:column; align-items:center; justify-content:center; gap:18px;
+     transform:translateY(-5%);  /* 视觉居中：数学正中会显得偏低，往上提一丝 */
+     pointer-events:none; opacity:0; animation:paneSizingHint .2s ease .3s forwards}
+  #c-pane-loading .k-logo{font-size:22px}
+  /* 「连接中」这句是陪衬，不是主角：小字号 + 更淡的 --faint + 大字距 + 全大写，让它
+     往后退、安静下来（原来 16px 太大、没有深邃感）。logo 才是视觉重心。 */
+  #c-pane-loading .lbl{color:var(--faint); font-size:11px; font-weight:500;
+     letter-spacing:.24em; text-transform:uppercase;
+     font-family:ui-monospace,Menlo,Consolas,monospace}
+  @keyframes paneSizingHint{to{opacity:1}}
+  #c-pane-body.off{display:none}
+  /* pane 弹窗铺满视口 —— owner 的选择是「铺满视口，像 jupyter」。
+     改的只有 **#c-pane-modal 自己**，`.modal` / `.modal-box` 这两个基类一个字没动（铺满是
+     #c-pane-modal 的覆写，不是改基类），所以别的用这套类的弹窗还是屏幕中间那张小卡片。
+     少掉的三样东西都是卡片的壳：24px 的 scrim 内边距（390px 的手机上白吃 48px = 3-4 列）、
+     14px 的圆角和那圈边框、投影。换来的是整块视口都是终端 —— 而且因为几何跟着盒子走
+     （paneFitGeom 会把对面那个 window 调成盒子能摆下的格数），铺满之后多出来的空间变成的是
+     **列数和行数**，不是四周的黑边。
+     还剩的黑边只有「不到一整格」的那点余量（#c-pane-term.on 的居中把它平分到两边），以及
+     对面调不动时的那种：只读目标 / resize 被拒的时候几何还是对面原来那个数，盒子大、终端小，
+     居中 + overflow:auto —— 看得见的是一个完整的、能滚的终端，不是被切掉右边的终端。
+     一条代价说清楚：铺满之后没有「弹窗外面那片灰」了，所以**点外面关窗这条路没了**。关窗
+     剩两条：头上那颗「关闭」，和闸关着时的 Esc（闸开着时 Esc 要留给对面，见那条 keydown）。
+     那个 click 监听没删 —— 它判的是 ev.target 就是遮罩本身，现在永远不成立，留着是为了
+     「以后谁把 padding 加回来，这条路自己就活了」。 */
+  /* 终端铺满顶栏以下的整块主区（从 --titlebar-h 往下到底）。顶栏因此一直露着、可切 Tab。
+     用 top + bottom 锚定（不再 height:100dvh）：地址栏收放时底边仍贴视口，顶栏不被盖。 */
+  #c-pane-modal{padding:0; top:var(--titlebar-h); height:auto}
+  #c-pane-modal .modal-box{
+    width:100%; height:100%; max-height:100%;
+    border:0; border-radius:0; box-shadow:none;
+  }
+  /* 弹窗开着的时候整页不许滚（2026-10-12，owner：「把页面往下滑 会出现白边，然后开始输入
+     文字之后 白边就没了 会这样抖动一下」）。两件事叠出来的那一下：
+       ① 窄屏那条媒体查询把 `html,body` 放成 `height:auto; overflow:visible` —— 整页是能
+          滚的。弹窗是 position:fixed 盖在视口上的，往下滑露出来的是它下面的页面底，而这块
+          板子的 --bg 是浅色：那就是那条白边。
+       ② 手机浏览器的地址栏一收，视觉视口变高，但 fixed 元素的包含块（布局视口）不跟着那
+          一下走 —— 高度对不上的那一瞬屏上就是挪一下。一碰输入法/键盘又触发一次真的
+          resize，于是「输入文字之后白边就没了」。
+     ① 用这条锁死（fixed + inset 是为 iOS Safari：那边光 overflow:hidden 拦不住橡皮筋），
+     ② 用上面那条 `height:100dvh`（dvh = 动态视口高度，地址栏收放它自己跟着变）。
+     锁在 html 和 body 两层上：只锁一层的话另一层仍然是滚动容器。 */
+  html.pane-open, body.pane-open{overflow:hidden; height:100%; position:fixed;
+                                 inset:0; width:100%}
+  /* 头条压薄一点：铺满之后它是唯一占着终端高度的东西，而它只需要放一个名字和两颗按钮。 */
+  #c-pane-modal .modal-h{padding:8px 12px}
+  /* 键盘直通：这块板子上在终端里按的每一个键都直接落到对面真终端里。
+     ROUND9 第二轮把那颗按钮和那条「键盘：…」的字一起删了（owner：「下面那个派活、键盘、
+     可打字 这些乱七八糟的东西 不知道是干啥的」），所以这里也不再有它的红框样式。
+     「能不能打字」现在由终端自己说：可写的目标光标在眨（cursorBlink），不可写的是个
+     死块（disableStdin 关着，onData 压根不触发）。规则一个字没变，只是不再用文字喊。 */
+
+  .err{margin:12px 16px; padding:9px 12px; border:1px solid var(--bad-line);
+       background:var(--bad-bg); color:var(--bad); border-radius:var(--r-sm); font-size:11px}
+  /* 降级但不是坏掉：roster 拿不到实时数据、退回上一次成功的缓存时用这个。
+     跟 .err 分开是因为两件事不一样 —— 红 = 什么都没有，黄 = 有，但是旧的。 */
+  .err.cached{border-color:var(--busy-line); background:var(--busy-bg); color:var(--busy)}
+
+  /* ── 窄屏（手机）──────────────────────────────────────
+     在手机上打开看到的是桌面多列布局：这一页原来**一条 @media 都没有**，
+     固定挡位（gate 430 / loop 352 / jobwrap 372 / footer 244）在 390px 宽的屏上必然
+     横向溢出，而 body 是 overflow:hidden —— 溢出的那半不是滚出去，是看不见。
+     这一段是**纯新增的覆盖**：上面每一条桌面规则的字面文本一个字都没改。逐字抄了本文件
+     CSS 的那些断言因此都还落在原规则上（render-test 读的是剥了注释的样式表文本：
+     `#c-pane-term.on{…overflow:hidden}`、`#c-pane-term .xterm{padding:…}` 那几条），
+     而这一段里唯一盖掉桌面值的那条（手机上的 `.xterm` 内边距）自己也有断言盯着 ——
+     它和桌面那条一样必须挂在**里面那层** .xterm 上，不许挂到宿主盒子上。
+     断点取 860px（2026-10-12 从 640 提上来）：桌面那套 footer 三列加上下限和留白最少要
+     848px（240+300+260 + 两道 gap + 左右 padding，见那几条下限上面的注释），比这个窄就
+     一定有一列读不成。原来取 640 是「比任何一部手机的竖屏都宽」，但 641~860 这一段既不
+     是手机也摆不下三列：实测 780px 宽时「事件时间线」那列被压到 2px、「RSI loop」那列的
+     右边缘跑到 820，而 body 是 overflow:hidden —— 溢出的那半看不见也滚不到。
+     横屏手机（844×390）现在走这一套：它的宽度 844 < 848，三列**挤不下**（之前这里写着
+     「那个宽度三列挤得下」，是错的，实测过了）。高度不够那件事仍然没做 —— 要做是另一个
+     max-height 的断点，得先有人在横屏上看过。 */
+  @media (max-width:860px){
+    /* 桌面是「视口定高 + 每块自己内部滚」。手机上没有那么多高度可分：改成整页纵向滚，
+       每块各带一个上限，块内仍然滚自己的。 */
+    html,body{height:auto; min-height:100%}
+    body{overflow:visible; -webkit-text-size-adjust:100%}
+    .tab-pane.on{flex:0 0 auto}
+
+    /* 顶栏：手机上保持单行不换行；品牌只留珊瑚 logo、版本 pill 收起，把横向空间让给 Tab 条，
+       Tab/图标钮放大到好按的触控尺寸。 */
+    header#titlebar{flex-wrap:nowrap; padding:0 8px; gap:3px}
+    .brand{padding-right:6px; margin-right:1px}
+    .brand-logo{font-size:10px}
+    .brand-name{display:none}
+    .verpill{display:none}
+    .ktab{max-width:150px; height:34px}
+    #tab-home, #tab-new{width:36px; height:34px}
+    /* 撰写框 + 额外按键条只在手机 + 终端可写时出现 */
+    #c-pane-modal.open.kbd #compose{display:flex}
+    #c-pane-modal.open.kbd #kbar{display:flex}
+
+    /* 元信息带：胶囊换行，不靠省略号。select.sw 的 max-width:min(300px,17vw) 在 390px
+       上只剩 66px，正好是把一个长 session 名裁掉的宽度。 */
+    .hslot{flex-wrap:wrap; row-gap:7px; gap:10px; padding:9px 12px; align-items:flex-start}
+    .caps{flex:1 1 100%}
+    select.sw{max-width:none}
+    .pill{height:auto; min-height:26px; padding:3px 9px}
+    .goal{flex:1 1 100%; flex-wrap:wrap; row-gap:6px}
+    .goal-obj{flex:1 1 100%; white-space:normal; overflow:visible; text-overflow:clip}
+    .stale{flex:1 1 100%; white-space:normal; overflow:visible}
+    .tick{flex:1 1 100%; text-align:left}
+    /* 多列横排 → 单列堆叠，固定 px 挡位 → 100%。这是本段的主干。
+       2026-10-19：底部 footer 退役成右检视栏 .rsi-rail，窄屏它也落到 transcript 下方整宽竖排。 */
+    main{flex-direction:column; padding:10px 10px 0}
+    /* 总览页底部也按 HIG 留白：尊重安全区，没报安全区也兜一个基线，不贴屏幕底边。 */
+    main.last{padding-bottom:max(12px, env(safe-area-inset-bottom, 0px))}
+    .rsi-rail{flex:0 0 auto; width:100%; min-width:0}
+    .run-wrap,.pane-col,.pane-col.skills,.pane-col.base,.pane-col.engine,.kwrap,.jobwrap{
+      flex:0 0 auto; width:100%; min-width:0;
+    }
+    /* 堆起来之后每块都不再「分到」高度了（父容器高度是内容决定的），所以给每块的滚动区
+       一个 65vh 的上限：否则一块 300 行的 transcript 会把下面的块整个推出屏幕，而手机上
+       没人知道下面还有东西。 */
+    .run-wrap>.scroll,.pane-col>.scroll,.kwrap>.scroll,.jobwrap>.scroll{max-height:65vh}
+    .ttl{padding:10px 12px; flex-wrap:wrap; row-gap:6px}
+    .empty{padding:30px 14px}
+    .empty .why{max-width:100%}
+    /* 事件行的四格（时间 | 种类 | 标签 | 详情）换行，详情自己占一行且不裁：手机上
+       一行能放 30 个汉字，省略号之后那条事件等于没显示。 */
+    .ev{flex-wrap:wrap; row-gap:2px; padding:5px 12px}
+    .ev .l{max-width:100%}
+    .ev .d{flex:1 1 100%; white-space:normal; overflow:visible; text-overflow:clip}
+    .diag{padding:9px 12px}
+    .vd,.lp{padding:11px 12px}
+    /* kore sessions 列表：名字 + 徽章换行（徽章的 margin-left:auto 在换行后会把它推到
+       第二行最右边，去掉）。行上已无操作按钮——写操作都在终端里，所以这里只收窄内边距。 */
+    .k-row{padding:11px 12px}
+    .k-h{flex-wrap:wrap; row-gap:5px}
+    .k-tag{margin-left:0}
+    .form{padding:11px 12px}
+    .jobs{padding:8px 12px}
+    .job{flex-wrap:wrap; row-gap:2px}
+    .job .msg{flex:1 1 100%; white-space:normal; overflow:visible; text-overflow:clip}
+    /* pane 弹窗。宽度本来就是 min(1100px,100%)，所以手机上不是「1100 固定宽」溢出，
+       而是 scrim 的 24px padding 在 390px 上白吃掉 48px —— 字号现在是固定的（13px 默认），
+       所以这 48px 不再换成字号，而是直接换成**列数**：对面的 window 跟着盒子变
+       （paneFitGeom），少 48px 就少 3-4 列。手机上列数本来就紧，所以这条规则更要紧了。
+       `align-items` 保持基规则的 center（**没有**改成 stretch）：手机是「高度富余、宽度
+       拮据」，盒子一撑满高度，24 行的终端就只占中间 216px，上下各一片 240px 的黑 ——
+       实测过一次，图在 ref/mobile/ 的第一版里。高度留给内容决定，盒子贴着终端收口。
+       这一段是 `.modal` 基类的手机规则**整段保留**，当共享弹窗壳的兜底：pane 自己走上面那条
+       `#c-pane-modal` 的 ID 规则（铺满视口，padding 0、无圆角、height:100%），ID 的特异性比
+       这里的类选择器高，和谁先谁后无关。上面那段「24px 换成 3-4 列」的账在手机上变成了
+       「5px 也不吃了」，方向没变，只是更彻底。
+       那条「盒子撑满高度就上下各一片黑」的实测结论没有过期，但它的前提是**几何不跟着盒子
+       变**：现在 paneFitGeom 会把对面那个 window 的行数调成盒子能摆下的行数，所以撑满高度
+       换来的是行数，不是黑边。前提不成立的那两种情形（只读目标、resize 被拒）黑边会回来，
+       那时候它是诚实的 —— 对面就是那么大，而字号是人定的。 */
+    .modal{padding:5px}
+    .modal-box{width:100%; max-height:100%; border-radius:10px}
+    .modal-h{padding:10px 12px; flex-wrap:wrap; row-gap:7px}
+    .modal-b{padding:11px 12px}
+    /* 头上那两颗图标钮（刷新 / 关闭）在触屏上放大到 36px，手指好按（桌面是 24px）。
+       .modal-h 本来就允许换行（flex-wrap:wrap），挤不下会掉到第二行。
+       底下那一排（派活框 / 派活 / Esc / 键盘）ROUND9 第二轮整排删掉了，所以 .modal-f
+       的两条手机规则也跟着删了 —— 页面上已经没有这个类的用户。 */
+    .modal-h .ic{width:36px; height:36px}
+    .modal-h .ic svg{width:18px; height:18px}
+    /* 终端宿主的左右 padding 从 18px 压到 4px。100 列的屏在 390px 宽上每列只有 3.6px，
+       省下来的那 14px 就是一档字号。上面那条 #c-pane-term.on 一个字没动（align-items /
+       justify-content 的居中仍然在它身上，两处断言抄的就是那一行）。
+       和桌面那条一样挂在里面那层 .xterm 上：挂在 #c-pane-term 上会被 fit 的量盒子算成
+       可用空间，手机上多出来的 6px 一样会长出外面那条滚动条。 */
+    #c-pane-term .xterm{padding:3px 2px 0}
+  }
+</style>
+</head>
+<body>
+
+<header id="titlebar">
+  <div class="brand">
+    <pre class="brand-logo" aria-hidden="true"> ▐▛▜▌
+▝▜▛▘</pre>
+    <span class="brand-name">kore</span>
+  </div>
+  <!-- 会话 Tab 条：Home（总览）固定最左，之后是打开的 session，末尾一个 + 新建。
+       每个 session Tab 是「打开的终端」的轻量引用，切 Tab = 把那一个终端实例重指到它。
+       data-active 标活动 Tab；关 Tab 只是从条上摘掉，不杀 session（杀仍走名单行那颗红钮）。 -->
+  <button id="tab-home" data-active="true" title="总览 / 新建会话" aria-label="总览">
+    <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
+  </button>
+  <!-- 只有会话 Tab 装在这条可横滚、两端渐隐的 strip 里；Home / + 在它外面，不吃那层遮罩。 -->
+  <nav id="tabstrip" aria-label="会话标签"><div id="tablist"></div></nav>
+  <button id="tab-new" title="新建会话（跳到总览并展开新建表单）" aria-label="新建会话">
+    <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><line x1="8" y1="3.2" x2="8" y2="12.8"/><line x1="3.2" y1="8" x2="12.8" y2="8"/></svg>
+  </button>
+  <div class="tb-right">
+    <span id="ver-pill" class="verpill" title="kore 版本（服务端 __version__，/api/kore/roster 带回）"></span>
+  </div>
+</header>
+
+<!-- ══ Tab kore session：kore 域，可写 ════════════════════════════════════════════
+     2026-10-19 域轴重构：rsi 写模块（起/停/发）已整体迁去 rsi Tab，这屏收成纯 kore 域 ——
+     集群里的 kore worker（新建 / 杀 / 进终端打字），数据是集群全局的、不属于任何 rsi run。
+     写面结构：这棵子树里所有 fetch 写动词只打 /api/kore/ 这一族（kPost 一扇），绝不碰
+     /api/loop/*。render-test.mjs 有断言盯着「kore 区恰 1 扇写门、全在 /api/kore/、零 /api/loop/」。 -->
+<section class="tab-pane on" id="pane-kore">
+  <!-- kore Tab 自己的元信息带（节点数 + 写操作回执 #c-note）。两条带子各归各的 pane，
+       header 从此只有品牌和 Tab。 -->
+  <div class="hslot" id="c-hbar">
+    <div class="caps">
+      <span class="pill" id="c-node" title="koreops 报的可路由节点数（/api/kore/roster，roster 读缓存+手动刷新，和名单年龄的 10s 轮询分开）。连不上的节点单独计数，不会拖住本页渲染。">
+        <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="2.6" width="11.6" height="4.4" rx="1.3"/><rect x="2.2" y="9" width="11.6" height="4.4" rx="1.3"/><path d="M4.7 4.8h.01M4.7 11.2h.01"/></svg>
+        节点 <span id="c-node-v">—</span>
+      </span>
+    </div>
+    <div class="tick"><span id="c-note"></span></div>
+  </div>
+  <main class="last">
+    <div class="kwrap card">
+      <div class="ttl">kore sessions <span class="n" id="c-n"></span>
+        <!-- 2026-10-12 owner：砍掉注册表/全集群的双模式切换，只认全集群但把结果缓存住
+             （server 已有 120s cluster 缓存）。平时读缓存秒回、不自动重扫；这颗是唯一的
+             force 重扫入口，点它才真逐个扫存活节点（坏节点各付一次 ~35s 超时），转圈只在
+             这一下。 -->
+        <button id="c-refresh" style="margin-left:auto" title="重扫全集群（结果缓存，平时读缓存秒回；点这个才真重扫，坏节点各付一次 ~35s 超时）" aria-label="刷新全集群"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>刷新</button>
+        <!-- 白底次按钮，不是黑色主按钮。纯黑 = 页面上最强的视觉召唤，不该长在通向写操作
+             的那条路上。黑色留给表单里的「起」。
+             理由：`+ 新建` 本身并不写任何东西，它只是 toggle 表单（见 `c-new.onclick`），
+             真正 POST 的是「起」。 -->
+        <button id="c-new" title="展开建 session 的表单（本身不写任何东西，真正下手的是表单里的「起」）">+ 新建</button>
+      </div>
+      <div class="form" id="c-form">
+        <label for="c-f-node">节点</label><select id="c-f-node"></select>
+        <label for="c-f-name">名字（会自动加 <span id="c-f-prefix">kore-</span> 前缀）</label><input id="c-f-name" placeholder="worker1">
+        <label for="c-f-cwd">工作目录</label><input id="c-f-cwd" value="~">
+        <label for="c-f-role">角色说明（可空）</label><input id="c-f-role" placeholder="做什么用的">
+        <div class="k-btns"><button id="c-f-go" class="primary">起</button><button id="c-f-cancel">取消</button></div>
+      </div>
+      <div class="scroll" id="c-list" role="listbox" tabindex="0" aria-activedescendant=""></div>
+    </div>
+    <!-- 2026-10-19：原「RSI session」jobwrap 卡（chips + 对话流 + 撰写框 + 停）已整体
+         迁去 rsi session Tab（#pane-rsi 的 run-wrap），这屏只剩 kore 域。 -->
+  </main>
+  <!-- pane 弹窗：里面就是一个终端。
+       ROUND9 第二轮，owner 的原话：「下面那个派活、键盘、可打字 这些乱七八糟的东西 不知道
+       是干啥的，而且字体大小显示也很莫名其妙。只是在里面放个终端 怎么这么难。。。」——
+       所以底下那一排（派活输入框 / 派活 / Esc / 键盘）整排删掉，头上只剩刷新和关闭两颗
+       （字号那两颗也在同一轮删了，字号现在只有 Ctrl+滚轮一条改法）。能不能打字不再用文字
+       说：可写的目标光标在眨，就是能打；不可写的目标光标是个
+       死块，而且 xterm 那层 disableStdin 关着。
+       ROUND10：这一格铺满整个视口（见 #c-pane-modal 的 CSS），所以它现在就是一条细头条
+       加一个终端，没有卡片的边框、圆角和投影了。
+       撤掉的仍然只有 UI：服务端算的 writable、Bearer + POST + confirm 那扇门、600/min
+       的限速，一个字节没动。2026-10-13 owner：名单每行上的写键（派活/Esc/停）也整排撤了 ——
+       打断/催在终端里本就能直接做，唯一留在 UI 上的写口是本头条右侧那颗「杀」（从 session
+       外面 kill 它，终端里不好自做），走和原来一样的 kWrite→kPost 那扇门。 -->
+  <div class="modal" id="c-pane-modal">
+    <div class="modal-box">
+      <div class="modal-h"><pre class="k-logo" aria-hidden="true"> ▐▛███▜▌
+▝▜█████▛▘
+  ▘▘ ▝▝</pre><span id="c-pane-title">pane</span>
+        <span class="k-tag" id="c-pane-state"></span>
+        <button class="ic r" style="margin-left:auto" id="c-pane-refresh" title="重连" aria-label="重连"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+        <!-- 2026-10-13 owner：杀从名单每行挪到这里 —— 从 session 外面 kill 它这件事在终端里不好自做，
+             值得单独留一颗；描红 + 二次确认，和「打断=终端里按 Esc」差一个数量级。 -->
+        <button class="ic x" id="c-pane-close" aria-label="关闭" title="关掉这个 pane 弹窗。终端里按的每一个键都直接落到对面（Esc 也是），所以退出请走这颗按钮 —— 终端铺满整个视口之后，弹窗外面已经没有那片灰可点了。"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+      <div id="c-pane-term"><div id="c-pane-loading" aria-hidden="true"><pre class="k-logo"> ▐▛███▜▌
+▝▜█████▛▘
+  ▘▘ ▝▝</pre><div class="lbl">Connecting…</div></div></div>
+      <pre class="modal-b" id="c-pane-body">载入中…</pre>
+      <!-- 移动端撰写框：手机软键盘直接打进 xterm 的隐藏 textarea 对输入法/语音很不友好——
+           流式语音合成（边说边改）会被打断、还有逐字回显的延迟。这里换成一个**原生**输入框：
+           输入法、语音听写、流式改写全交给浏览器原生处理，本地即时回显零延迟；回车（或发送钮）
+           才把整句经 paneInput 送进对面（Bearer+POST+confirm 同一扇写门）。空内容回车 = 单独回车。
+           只在手机 + 终端可写时出现（见 #c-pane-modal.open.kbd）。 -->
+      <div id="compose">
+        <textarea id="compose-in" rows="1" enterkeyhint="send"
+          autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"
+          placeholder="输入或语音… 回车发送"></textarea>
+        <button id="compose-send" aria-label="发送" title="发送（回车）">
+          <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13.5V3M8 3L3.5 7.5M8 3l4.5 4.5"/></svg>
+        </button>
+      </div>
+      <!-- 移动端「额外按键」条（抄 Termux 的 extra-keys row）：软键盘打不出来的键放这里。
+           每颗把一段终端字节序列喂进和软键盘同一扇输入门（paneInput → /api/kore/input，
+           Bearer+POST+confirm 一个字没松）。Ctrl 是 Termux 式「黏一次」修饰键：点亮后改写
+           下一个键（软键盘的也算）。只在手机 + 当前终端可写时出现（见 #c-pane-modal.open.kbd）。 -->
+      <div id="kbar" role="toolbar" aria-label="终端额外按键">
+        <button class="kb" data-k="esc" title="Esc（打断/退出菜单）">Esc</button>
+        <button class="kb" data-k="tab" title="Tab">Tab</button>
+        <button class="kb" data-k="stab" title="Shift+Tab（claude-code 切模式）">⇧Tab</button>
+        <button class="kb kb-mod" data-k="ctrl" aria-pressed="false" title="Ctrl（黏一次：改写下一个键）">Ctrl</button>
+        <button class="kb" data-k="c-c" title="Ctrl+C（中断）">^C</button>
+        <span class="kb-sep" aria-hidden="true"></span>
+        <button class="kb" data-k="left" aria-label="左">←</button>
+        <button class="kb" data-k="down" aria-label="下">↓</button>
+        <button class="kb" data-k="up" aria-label="上">↑</button>
+        <button class="kb" data-k="right" aria-label="右">→</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ 脚本：三个 data-zone 块 ════════════════════════════════════════════════
+     「哪段代码能写什么」是文件结构、不是注释约定：每个域块只打自己那一族门。
+       shared —— 共用小工具 + 唯一的读客户端 apiGet（单参、无 method/body）。全是
+                 const/function，一个 let/var 都没有 —— 没有跨块共享可变状态。
+       kore   —— kore session 面板。唯一的写客户端 kPost()，恰 1 处 `method:'POST'`，
+                 只打 /api/kore/ 这一族。
+       shell  —— 起轮询。不渲染面板数据，零 `fetch(`、零 `method:`。 -->
+<script data-zone="shared">
+'use strict';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+/* Some session ids are literally `session-<uuid>` (the deepseek-harness ones),
+   so a blind slice(0,8) renders two of them as the identical string `session-`. */
+const shortId = id => String(id || '').replace(/^session-/, '').slice(0, 8);
+const ago = ts => {
+  if (!ts) return '';
+  const d = Math.max(0, Date.now()/1000 - ts);
+  if (d < 60) return Math.floor(d) + 's前';
+  if (d < 3600) return Math.floor(d/60) + 'm前';
+  if (d < 86400) return Math.floor(d/3600) + 'h前';
+  return Math.floor(d/86400) + 'd前';
+};
+
+/* 2026-09-23: server now requires a token. Take it from ?token=… (the URL you
+   open the dashboard with) and reuse it for every poll.
+   2026-10-12: the token stays IN the URL — it is NOT stripped from the address bar.
+   History: it used to be wiped with replaceState so a shared screenshot would not
+   leak it; but that meant Cmd-R reloaded a token-less URL and the page came back
+   unauthorized (a refresh dropped the token and the page showed unauth). The call: this
+   token is allowed to leak, so the fix is the
+   simplest one — leave it in the bar. A reload reloads the same URL, token and all,
+   so it is never lost. No replaceState, no sessionStorage copy: one source of truth,
+   the URL. (The whole fence is still the token + Bearer + confirm on writes; see
+   service-8197.sh — nothing about write safety changed here.) */
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+
+/* 唯一的读客户端。一个参数，没有 opts —— 调用方没有任何办法从这里发出一个非 GET
+   的请求：没有 method、没有 body、没有 Content-Type。ROUND7 之前这里是
+   `api(path, opts)`，观察侧只传一个参数、操控侧传一个带写动作的 opts；那种形状下
+   「观察 Tab 不写」靠的是调用方的自觉。现在靠的是签名。
+   写入走 control 块自己的 kPost()，那是全页唯一一处 fetch 带 method 的地方。 */
+async function apiGet(path) {
+  const r = await fetch(path, {
+    cache: 'no-store',
+    headers: TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {},
+  });
+  const d = await r.json().catch(() => ({ error: 'HTTP ' + r.status }));
+  if (!r.ok) throw new Error(d.refused || d.error || ('HTTP ' + r.status));
+  return d;
+}
+
+
+/* ── shared 块到此结束 ──────────────────────────────────────
+   这一块是 `const`（几个小工具 + TOKEN）和 `function`（唯一的读客户端 apiGet）：
+   一个 `let`/`var` 都没有，没有东西可以被一处改了另一处看见。 */
+</script>
+
+<script data-zone="kore">
+'use strict';
+/* ── kore sessions：kore 域的写入面（2026-10-19 域轴重构后它只写 /api/kore/，rsi 写门在 rsi 块）──
+   Every write here POSTs to /api/kore/<verb> with a Bearer header and a `confirm`
+   field naming its own target; the server hands back a job id and the work runs on
+   a background thread. Nothing on this page ever waits for a remote agent to
+   finish thinking — `kore_send` can legitimately take minutes.
+   这些数据是集群全局的（roster），不带任何 rsi run 参数 —— kore 域和 rsi 域互不知道对方的选中态。 */
+let kRows = [];
+// The live session-name prefix, as reported by the backend (/api/kore/roster -> r.prefix,
+// = KORE_BRIDGE_PREFIX). renderK refreshes it every roster tick; kPost uses it to build
+// the write `confirm` string so it mirrors koreops.full_name() EXACTLY — never hardcoded.
+// Defaults to the backend's own default so a write works even before the first roster.
+let kPrefix = 'kore-';
+
+/* ── 星标（取代注册表那种「精选子集」，owner 2026-10-13）──
+   纯前端：持久化只有 localStorage 一个 key，不进任何服务端状态、不跨 Tab。稳定 id =
+   node_ip + '/' + name（名字在集群里不保证唯一，带上节点才认得准）。kStarSet 是进程内
+   真相来源，初值从 localStorage 读，存不住（隐私模式/满了）就退化成本次会话的内存态——
+   星标照样点得动，只是刷新后不记得。 */
+let kStarSet = (() => {
+  try { return new Set(JSON.parse(localStorage.getItem('kore.stars') || '[]')); }
+  catch (e) { return new Set(); }
+})();
+function kStarId(s) { return s.node_ip + '/' + s.name; }
+function kToggleStar(s) {
+  const id = kStarId(s);
+  if (kStarSet.has(id)) kStarSet.delete(id); else kStarSet.add(id);
+  try { localStorage.setItem('kore.stars', JSON.stringify([...kStarSet])); } catch (e) { /* 存不住就本次内存态 */ }
+  kSortRows();
+  kPaintList();
+}
+/* 星标优先，组内保持 roster 原顺序。Array.prototype.sort 从 ES2019 起保证稳定，所以同为
+   「星标 / 非星标」的两行相对次序不变 —— 不另加决胜键。roster 顺序本身稳定，星标集合也稳定，
+   所以每次 roster 刷新重排得到的是同一个序，kSel 指的那一行不会无故跳。 */
+function kSortRows() {
+  kRows.sort((a, b) => (kStarSet.has(kStarId(b)) ? 1 : 0) - (kStarSet.has(kStarId(a)) ? 1 : 0));
+}
+
+/* 列表行上的「杀」—— 页内两步确认，不靠 window.confirm。
+   2026-10-13 owner：这环境把浏览器原生 confirm/alert 整个吞了（一点就直接返回「取消」，不弹窗），
+   所以杀绝不能押在原生弹窗上。做法：第一次点某行的垃圾桶只「待命」，把那颗钮渲成红底白字
+   「确认杀」，顶栏吐司条说一句，3 秒不点自动撤；第二次点同一行才真走 kWrite('stop') 那扇写门
+   （Bearer + POST + confirm 串 + 码点/速率限，一个字没松）。待命只记 kStarId（稳定），所以 roster
+   重排/重画都认得是哪一行、重画不丢待命；换点别行的垃圾桶就把待命移到那行。这颗双击 arm 本身就是
+   防误触：单点一下只亮红待命，不会杀掉任何东西。反馈走 note() 的顶栏吐司条 —— 列表页没弹窗盖着，
+   看得见（当初杀在 pane 头条「点了没反应」就是吐司条被整屏弹窗盖住了）。 */
+let kKillArm = '';     // 当前待命要杀的那一行 kStarId；空串 = 没有任何行待命
+let kKillArmT = 0;
+function kKillDisarm() {
+  if (!kKillArm) return;
+  kKillArm = '';
+  clearTimeout(kKillArmT);
+  kPaintList();        // 把那颗钮从红「确认杀」还原成静息垃圾桶
+}
+async function kKillClick(s) {
+  const id = kStarId(s);
+  if (kKillArm !== id) {                 // 第一次（或换了一行）：只待命，不杀
+    kKillArm = id;
+    clearTimeout(kKillArmT);
+    kKillArmT = setTimeout(kKillDisarm, 3000);
+    kPaintList();                        // 那颗钮据 kKillArm 渲成红「确认杀」
+    note(`再点一次红色「确认杀」= 真杀 ${s.name}（kill 整个 tmux，未存对话没掉，不可撤）；3 秒不点自动撤`, true);
+    return;
+  }
+  kKillArm = '';                         // 第二次点同一行：解除待命，真杀
+  clearTimeout(kKillArmT);
+  kPaintList();
+  await kWrite('stop', s, {});           // 成功/被拒都由 kWrite 自己 note（列表页顶栏吐司条看得见）
+}
+
+/* 全页唯一一处带 method 的 fetch。没有走 apiGet —— apiGet 只有一个参数，根本接不住
+   method/body；这是故意的，写入必须是一处显式的、grep 得到的例外，而不是读客户端的
+   一个可选参数。两条硬要求都在这里：Bearer 头（不是 ?token=，URL 里的写 token 会进
+   浏览器历史和反代日志），以及一条点名自己目标的 confirm 串。 */
+function kPost(verb, body, opts) {
+  // Mirror koreops.full_name(): prefix the name iff it isn't already prefixed. The prefix is
+  // the live one (kPrefix, from the roster) — NOT a hardcoded 'kore-', or every write
+  // breaks the moment KORE_BRIDGE_PREFIX differs (confirm != server's want -> 400).
+  const fullName = body.name.startsWith(kPrefix) ? body.name : kPrefix + body.name;
+  const confirm = `${verb}:${body.node_ip}:${fullName}`;
+  return fetch('/api/kore/' + verb, {
+    method: 'POST',
+    cache: 'no-store',
+    // keepalive 只给卸载路径用（见 paneGeomRestore / pagehide）：页面正在走人时，普通 fetch
+    // 会被浏览器掐掉，keepalive 的让它发完。Bearer 头照常随 fetch 带（sendBeacon 带不了，所以
+    // 还几何这一下不能用 beacon）。body 极小，远低于 keepalive 的 64KB 上限。
+    ...(opts && opts.keepalive ? { keepalive: true } : {}),
+    headers: { 'Content-Type': 'application/json',
+               ...(TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}) },
+    body: JSON.stringify({ ...body, confirm }),
+  }).then(async r => {
+    const d = await r.json().catch(() => ({ error: 'HTTP ' + r.status }));
+    if (!r.ok) throw new Error(d.refused || d.error || ('HTTP ' + r.status));
+    return d;
+  });
+}
+function note(msg, bad) {
+  // Notes live in their own span: the 5s clock refresh must not wipe a refusal
+  // reason before it has been read. Errors linger 4x longer than confirmations.
+  const el = $('c-note');
+  el.textContent = msg ? ' · ' + msg : '';
+  el.style.color = bad ? 'var(--bad)' : 'var(--text)';
+  const mine = (note.seq = (note.seq || 0) + 1);
+  setTimeout(() => { if (note.seq === mine) el.textContent = ''; }, bad ? 20000 : 5000);
+}
+
+function renderK(r) {
+  kRows = r.sessions || [];
+  kSortRows();   // 星标置顶（稳定排序，见 kSortRows）—— 在算 kSel/画表之前就把顺序定下来
+  // ROUND7-FIX #2：这里原来还会 publishClusterFacts() 一次，把集群事实推给观察半边的
+  // 本块（操控侧的集群 roster 视图）对观察半边**零输出** —— 两个 Tab 之间没有任何共享
+  // 可变状态，各自独立拉数据，谁坏了都不牵连另一边。（观察侧那块曾消费集群事实的「本轮
+  // 扇出」面板已于 2026-10-14 整块删除。）
+  // `stale` = 读节点的子进程死了/超时了，服务端退回上一次成功的 roster。
+  // 这种情况下 ok 是 false 但 sessions 不是空的 —— 如果不说，这些行看起来就跟实时的
+  // 一模一样，那是页面在对读者说假话。所以 stale 必须自己开口。
+  const stale = r.stale === true;
+  const age = Math.round(r.stale_age_s || 0);
+  const ageTxt = age >= 60 ? `${Math.floor(age / 60)} 分 ${age % 60} 秒` : `${age} 秒`;
+  // 2026-10-12：只认全集群了（注册表模式砍掉），模式标签没意义，只留计数；server 退回上一次
+  // 成功 roster 的那种 stale 自带年龄（stale_age_s），直接说出来。
+  // 2026-10-13：另一种「旧」——操控区正常命中缓存、ok 的 roster，也会在屏上一直变旧，因为这边
+  // 不轮询 roster（只在加载/手动刷新/写后刷新三处拉）。那种年龄不靠 server 时钟（跨机器会偏），
+  // 按「本地收到这批的时刻」锚（kShownAt），由 kAgeTick 过线后追加「N 秒前的状态」并把点变淡。
+  kShownAt = Date.now();
+  kStaleFallback = stale;   // server-fallback 那种 stale 自己有年龄文案，不再叠加本地年龄
+  kHeadBase = `${kRows.length} 个` + (stale ? ` · ${ageTxt}前的缓存` : '');
+  kAgeTick();
+  // 顶部「节点」胶囊。集群取不到时它自己说出来（约束 2：集群挂了也要能渲染，
+  // 不许白屏），连不上的节点数单独挂出来而不是混进总数。
+  const cap = $('c-node'), nodeN = (r.nodes || []).length, un = (r.unreachable_nodes || []).length;
+  $('c-node-v').textContent = stale ? `${nodeN} · 缓存`
+    : (r.ok === false ? '取不到' : (nodeN + (un ? ` · ${un} 连不上` : '')));
+  cap.className = 'pill' + (stale ? ' warn' : (r.ok === false ? ' err' : (un ? ' warn' : '')));
+  cap.title = stale
+    ? `节点现在问不到（${r.error || '未知原因'}），这里显示的是 ${ageTxt}前最后一次成功的结果。`
+      + `看板进程没事；恢复后自动回到实时。`
+    : r.ok === false
+    ? `列取节点失败：${r.error || '未知原因'}。本页其余部分照常渲染。`
+    : `koreops 报的可路由节点数（/api/kore/roster，roster 读缓存+手动刷新，和名单年龄的 10s 轮询分开）` +
+      (un ? `。连不上：${(r.unreachable_nodes || []).join(', ')}` : '');
+  const warn = [];
+  if (stale) warn.push(`⏳ 下面这些行是 <b>${ageTxt}前的缓存</b>，不是现在的状态`
+    + `（读节点的子进程挂了：${esc(r.error || '未知原因')}）。`
+    + `session 可能已经不在了 —— 写操作服务端会重新核一遍存活再下手。`);
+  else if (!r.ok) warn.push(`列取失败：${esc(r.error || '未知原因')}`);
+  if ((r.unreachable_nodes || []).length)
+    warn.push(`连不上（agent 没响应）：${esc(r.unreachable_nodes.join(', '))}`);
+  // 2026-10-12：名字不合规矩的 session 被服务端在边界上丢掉了（koreops._roster_keep：名字
+  // 是从远端 tmux ls 里切出来的，不是我们起的）。丢掉可以，不说不行 —— 不然屏上少一行，
+  // 而少的那一行看起来和「这个 session 已经没了」一模一样。
+  if (r.skipped_name_count)
+    warn.push(`有 ${r.skipped_name_count} 个 session 的名字不合规矩，没列出来`
+      + `（只认字母数字和 - _，最长 48）：${esc((r.skipped_names || []).join(', '))}`);
+  // 提示条和空列表说明存起来：键盘换高亮时要重画这一个 box，重画必须把它们原样带回来，
+  // 否则「按一下↓，缓存警告就没了」—— 那是页面趁用户按键把话收回去。
+  kHint = warn.length ? `<div class="err${stale ? ' cached' : ''}">${warn.join('<br>')}</div>` : '';
+  // Never a bare empty box: say which nodes were looked at and why nothing came back.
+  // 前缀不写死：服务端在 /api/kore/roster 里带上 r.prefix（KORE_BRIDGE_PREFIX 的实际值），
+  // 没带到就退回默认的 kore-。表单提示和空列表说明都用它。
+  kPrefix = r.prefix || 'kore-';   // global: also feeds kPost's confirm string
+  const pfxEl = $('c-f-prefix'); if (pfxEl) pfxEl.textContent = kPrefix;
+  // 版本号：服务端在 /api/kore/roster 里带回 __version__（同 prefix 一处）。顶栏右侧 pill
+  // 显示它，并写到 <html data-kore-version> 上做一个 OpenCode 式的根钩子（给断言/调试用）。
+  if (r.version) {
+    $('ver-pill').textContent = 'v' + r.version;
+    document.documentElement.dataset.koreVersion = r.version;
+  }
+  kEmpty = `<div class="empty">没有 kore session<br><span style="font-size:11px">扫了全集群的存活节点，没有 ${esc(kPrefix)} 前缀的 session</span></div>`;
+  kPaintList();
+  renderTabs();   // 名字/前缀可能变了，让 Tab 上的标签跟着刷新
+  const sel = $('c-f-node');
+  const live = (r.nodes || []).map(n => n.node_ip);
+  if (sel.dataset.filled !== live.join(',')) {
+    sel.dataset.filled = live.join(',');
+    sel.innerHTML = (r.nodes || []).map(n =>
+      `<option value="${esc(n.node_ip)}">${esc(n.node_ip)}${n.job_name ? ' · ' + esc(n.job_name) : ''}${n.gpus ? ' · ' + n.gpus + 'GPU' : ''}</option>`).join('');
+  }
+}
+
+/* ── 会话 Tab 模型（OpenCode 式顶栏多 Tab）──
+   「打开的会话」是一组轻量引用 openTabs（只存 {node_ip,name}）；真正的终端只有一个
+   实例（paneTerm / paneStream，见下面 pane 那段）。切到某个 session Tab = openPane(s)
+   把那唯一的终端重指到它（openPane 内部先 paneUnsubscribe 再重订，天然就是「重指」）。
+   activeKey：'home' 或 session 的 node_ip/name（和 kStarId 同形）。 */
+let openTabs = [];      // [{node_ip, name}]，顶栏上打开着的会话
+let activeKey = 'home'; // 当前活动 Tab；'home' = 总览名单
+function tabKey(s) { return s.node_ip + '/' + s.name; }   // 和 kStarId 同形
+function kStripPrefix(name) { return name.startsWith(kPrefix) ? name.slice(kPrefix.length) : name; }
+function tabFindRow(key) {
+  // 优先用实时 roster 行（带 writable/state 等），退回 Tab 自己存的那份最小引用。
+  return kRows.find(s => tabKey(s) === key) || openTabs.find(s => tabKey(s) === key) || null;
+}
+function renderTabs() {
+  const list = $('tablist');
+  if (list) list.innerHTML = openTabs.map(s => {
+    const key = tabKey(s), label = kStripPrefix(s.name);
+    const av = (label.slice(0, 1) || '·');
+    return `<div class="ktab" role="tab" data-key="${esc(key)}" data-active="${key === activeKey}" title="${esc(s.name)} @ ${esc(s.node_ip)}">
+      <span class="ktab-av" aria-hidden="true">${esc(av)}</span>
+      <span class="ktab-t">${esc(label)}</span>
+      <button class="ktab-x" data-act="tabclose" data-key="${esc(key)}" title="关闭标签（不杀 session）" aria-label="关闭标签">×</button>
+    </div>`;
+  }).join('');
+  const home = $('tab-home'); if (home) home.dataset.active = (activeKey === 'home');
+}
+function openTab(s) {
+  if (!openTabs.some(t => tabKey(t) === tabKey(s)))
+    openTabs.push({ node_ip: s.node_ip, name: s.name });
+  activeKey = tabKey(s);
+  renderTabs();
+  openPane(s);   // 把那唯一的终端重指到这个 session（见 openPane）
+}
+function goHome() {
+  // 回总览：若终端开着，走它那条统一的关闭路径（会把 activeKey 复位 + renderTabs）；
+  // 否则直接复位。总览名单本来就在终端下面，关掉终端就露出来了。
+  if ($('c-pane-modal').classList.contains('open')) { $('c-pane-close').click(); return; }
+  activeKey = 'home';
+  renderTabs();
+}
+function closeTab(key) {
+  const idx = openTabs.findIndex(t => tabKey(t) === key);
+  if (idx < 0) return;
+  const wasActive = (activeKey === key);
+  openTabs.splice(idx, 1);
+  if (!wasActive) { renderTabs(); return; }
+  // 关掉的是当前活动 Tab：跳到右邻，没有就左邻，再没有就回总览。
+  const nxt = openTabs[idx] || openTabs[idx - 1];
+  if (nxt) openTab(nxt); else goHome();
+}
+$('tab-home').onclick = goHome;
+$('tab-new').onclick = () => { goHome(); $('c-form').classList.add('open'); $('c-f-name') && $('c-f-name').focus(); };
+$('tablist').addEventListener('click', ev => {
+  const x = ev.target.closest('button[data-act="tabclose"]');
+  if (x) { ev.stopPropagation(); closeTab(x.dataset.key); return; }
+  const tab = ev.target.closest('.ktab');
+  if (!tab) return;
+  const s = tabFindRow(tab.dataset.key);
+  if (s) openTab(s);
+});
+
+/* ── 状态诚实化：这批 roster 在屏上躺了多久（2026-10-13）──
+   操控区不轮询 roster，这批快照会一直变旧到下一次手动刷新/写后刷新。kAgeTick 把「躺了多久」
+   说出来：过 SHOW 秒在计数后缀上「N 秒前的状态」，过 DIM 秒给 #c-list 挂 .stale-age（点变淡 +
+   停 busy 呼吸光晕，见那两条 CSS）。纯本地、零网络：锚是 kShownAt（收到那刻），不减 server
+   时钟。server-fallback 那种 stale 自带年龄文案（kHeadBase 里已经有），这里不再叠加。 */
+let kShownAt = 0;            // 本地收到最近一批 roster 的时刻（Date.now）
+let kStaleFallback = false;  // 这批是不是 server 退回上一次成功的那种 stale
+let kHeadBase = '';          // renderK 定的计数基文案（含 server-fallback 年龄），重画带回来
+const K_AGE_SHOW = 10, K_AGE_DIM = 30;   // 秒：>SHOW 说年龄，>DIM 变淡+停脉冲
+function kAgeTick() {
+  if (!kShownAt) return;
+  const age = Math.round((Date.now() - kShownAt) / 1000);
+  const show = !kStaleFallback && age >= K_AGE_SHOW;
+  const ageTxt = age >= 60 ? `${Math.floor(age / 60)} 分 ${age % 60} 秒` : `${age} 秒`;
+  $('c-n').textContent = kHeadBase + (show ? ` · ${ageTxt}前的状态` : '');
+  $('c-list').classList.toggle('stale-age', !kStaleFallback && age >= K_AGE_DIM);
+}
+
+/* ── 单会话刷新：你刚盯完一个 session 退出来，那一行就该是最新的（2026-10-13 owner）──
+   全列表要最新很贵（每节点 tmux ls + capture + is_busy，是砍掉自动重扫前那条 ~35s 的慢扫），
+   所以不自动刷全表。但「你真动过的那一个」很便宜：/api/kore/read 走常驻 read-agent，一发
+   capture-pane 就拿到此刻的 busy/idle（和 roster 同一个 is_busy 真相源），不是开 pane 那条
+   冷 tap、也不碰集群。把成本钉在这一个会话上，就地把它那一行补成最新。全表要最新仍走刷新钮。
+   只收不放：读失败就不动那一行（别拿一次失败当「它变 idle 了」）。不碰 kShownAt —— 其余行
+   还是老样子旧，整屏「N 秒前」的锚不能因为单独核了一行就谎称全刷新了。 */
+async function kRefreshOne(s) {
+  if (!s) return;
+  const id = kStarId(s);
+  let r;
+  try {
+    r = await apiGet(`/api/kore/read?node_ip=${encodeURIComponent(s.node_ip)}&name=${encodeURIComponent(s.name)}`);
+  } catch (e) { return; }                        // 读失败：那一行保持原样，不说假话
+  if (!r || !r.state) return;
+  const row = kRows.find(x => kStarId(x) === id);
+  if (!row || row.state === r.state) return;      // 行没了 / 状态没变：不白重画
+  row.state = r.state;
+  kPaintList();
+}
+
+/* ── kore 列表的键盘上下选择（R7FIX-3 任务三）──
+   像 claude-code 那样：↑/↓ 移高亮、Enter 开 pane、Esc 退。全部在操控 Tab 里，纯前端，
+   不加依赖、不加构建步骤。
+   `kSel` 是**本地 UI 态**：它不进任何跨 Tab 的结构（这一块对观察半边零输出，见上面
+   renderK 的注释），也不进 kRows —— 高亮是「我现在看哪一行」，不是服务端事实。
+   高亮靠重画这一个 box 实现，而不是去摸某一行的 DOM：列表本来就是整块 innerHTML 渲染
+   的（10s 一次），再引入第二条「只改一行」的路径就会有两个真相来源，roster 一刷新就把
+   高亮吃掉。重画时 aria-selected / .sel / aria-activedescendant 一起出，同一次赋值。 */
+let kSel = -1;        // 高亮行号，-1 = 没有高亮
+let kHint = '';       // 上一次 renderK 算出来的提示条（缓存/连不上），重画要带回来
+let kEmpty = '';      // 空列表时的说明，同理
+
+function kPaintList() {
+  const box = $('c-list');
+  if (kSel >= kRows.length) kSel = kRows.length - 1;   // roster 变短了，别指空
+  if (!kRows.length) {
+    kSel = -1;
+    box.innerHTML = kEmpty;
+  } else {
+    box.innerHTML = kRows.map((s, i) => {
+      const meta = [s.node_ip, s.job_name, s.gpus ? s.gpus + ' GPU' : '', s.cwd].filter(Boolean).join(' · ');
+      const lock = s.protected ? `<span class="k-tag lock" title="${esc(s.write_block)}">受保护</span>`
+        : (!s.writable ? `<span class="k-tag lock" title="${esc(s.write_block)}">不可写</span>` : '');
+      const starred = kStarSet.has(kStarId(s));
+      const star = `<button class="k-star${starred ? ' on' : ''}" data-act="star" data-i="${i}" aria-pressed="${starred}" title="${starred ? '取消星标' : '星标（置顶）'}" aria-label="星标"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.1 8.6 22.3 9.3 16.8 14.2 18.4 21.4 12 17.6 5.6 21.4 7.2 14.2 1.7 9.3 8.9 8.6"/></svg></button>`;
+      // 待命态按稳定 id 渲染（见 kKillClick）：roster 重排/重画都认得是哪一行，重画不丢待命。
+      const armed = kKillArm === kStarId(s);
+      const kill = `<button class="k-kill${armed ? ' arm' : ''}" data-act="kill" data-i="${i}" title="${armed ? '再点一次 = 真杀；3 秒不点自动撤销' : '杀掉这个 session（kill 整个 tmux session，未保存的对话就没了）'}" aria-label="${armed ? '确认杀' : '杀掉 session'}">${armed ? '确认杀' : '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>'}</button>`;
+      return `<div class="k-row ${s.protected ? 'protected' : ''}${i === kSel ? ' sel' : ''}" role="option" id="c-row-${i}" aria-selected="${i === kSel}" tabindex="-1">
+        <div class="k-h"><span class="dot ${esc(s.state)}"></span><pre class="k-logo" aria-hidden="true"> ▐▛███▜▌
+▝▜█████▛▘
+  ▘▘ ▝▝</pre>
+          <span class="k-n" title="${esc(s.name)}">${esc(s.name)}</span>
+          ${lock}<span class="k-tag">${esc(s.state)}</span>${star}${kill}</div>
+        ${meta ? `<div class="k-m">${esc(meta)}</div>` : ''}
+        ${s.role ? `<div class="k-m">${esc(s.role)}</div>` : ''}
+        ${s.summary ? `<div class="k-s">${esc(s.summary)}</div>` : ''}
+      </div>`;
+    }).join('');
+  }
+  if (kHint) box.insertAdjacentHTML('afterbegin', kHint);
+  // 屏幕阅读器那一半：listbox 指向当前 option 的 id。没有高亮就是空串，不是 'c-row--1'。
+  box.setAttribute('aria-activedescendant', kSel >= 0 ? `c-row-${kSel}` : '');
+}
+
+function kKeyNav(ev) {
+  /* 返回值 = 这一下按键有没有被列表吃掉，纯粹为了能被断言，页面本身不看它。
+     第一条规矩：焦点在输入框里的时候一个键都不抢 —— 「派活」那个单行输入框就在
+     pane 弹窗里，上下键在输入框里是移光标，抢了就是 bug。用 ev.target 而不是
+     document.activeElement：前者是事件自己带的，后者在无头环境里根本不存在。 */
+  const t = ev.target || {};
+  if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT'
+      || t.isContentEditable) return false;
+  const k = ev.key;
+  if (k === 'ArrowDown' || k === 'ArrowUp') {
+    if (!kRows.length) return false;
+    if (ev.preventDefault) ev.preventDefault();     // 别让页面跟着滚
+    // #c-list 和 document 两处都挂了这个 handler（见文件尾那条 document keydown）。焦点在
+    // 列表里（含关 pane 后聚回的 c-row-i）时冒泡会让 document 那条再跑一次，一次按键走两行。
+    // #c-list 离得近、先收到，吃掉就 stop，document 不再重复触发。
+    if (ev.stopPropagation) ev.stopPropagation();
+    const d = k === 'ArrowDown' ? 1 : -1;
+    kSel = kSel < 0 ? (d > 0 ? 0 : kRows.length - 1)
+      : Math.max(0, Math.min(kRows.length - 1, kSel + d));
+    kPaintList();
+    // 滚进视野。重画之后才取这一行 —— 上一个 DOM 已经没了。
+    const row = $(`c-row-${kSel}`);
+    if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
+    return true;
+  }
+  if (k === 'Enter') {
+    const s = kRows[kSel];
+    if (!s) return false;
+    if (ev.preventDefault) ev.preventDefault();
+    if (ev.stopPropagation) ev.stopPropagation();    // 同上：别让 document 那条再开一次
+    // 只读：和整行点击同一条路（整张卡就是打开会话 Tab 的入口），kWrite / kPost 一个都不碰。
+    openTab(s);
+    return true;
+  }
+  if (k === 'Escape') {
+    // 两档：弹窗开着就不是我的事（关弹窗那条路归 #c-pane-close，见下面那个 document
+    // 监听），弹窗没开才是「取消高亮」。
+    if ($('c-pane-modal').classList.contains('open')) return false;
+    if (kSel < 0) return false;
+    if (ev.stopPropagation) ev.stopPropagation();    // 同上
+    kSel = -1;
+    kPaintList();
+    return true;
+  }
+  return false;
+}
+$('c-list').addEventListener('keydown', kKeyNav);
+
+/* ── pane modal ──
+   R7FIX-3 任务二（C）：pane 的内容现在是 SSE 推过来的，不是点一下读一次。
+   以前 refreshPane() 身上没有任何定时器 —— 不点「刷新」就是无限延迟，这是本轮最硬的
+   那个 bug。现在开 pane = 订阅 /api/kore/stream，服务端 ~1s capture 一次，只把**变化的
+   部分**推下来；关 pane = close()，连接一断服务端那条线程自己结束。
+
+   帧只有一种形状：{from, lines, total, state}。`from` 是上一帧和这一帧的公共前缀行数，
+   所以同一种形状同时覆盖三件事 —— 追加（from == 旧行数）、TUI 原地重绘（from ≈ 总行数
+   - 屏高，只补那几十行）、全量重发（from == 0，清屏时）。客户端因此只有一条 splice
+   逻辑要写对，而不是 full / append / tail 三种事件各一条。
+
+   ROUND8 在上面加了第二条路：**真终端**。两条路，二选一，分界线是「xterm.js 挂上来了没有」：
+     * 挂上了 → 订阅 mode=term。服务端推**带 ANSI 转义码**的帧（`full` 一次 + 之后每拍
+       `rows`），喂给 xterm.js，看到的就是 claude-code 本体的 TUI：配色、框线、原地重绘、
+       光标都是真的，不是把 ANSI 剥掉之后的影子。
+     * 没挂上 → mode 不传，服务端还是上面那条 {from,lines,total,state} 的纯文本 diff，
+       渲染进 <pre>。这条路不是摆设：vendor 文件 404、CSP 拦了注入的脚本、页面被单独存一份
+       拿去看，都会落到它上面，而它是本轮之前唯一存在过的那条路（任务书验收线 D）。
+   两条路共用同一个订阅函数、同一个 EventSource、同一套关闭/重连，不同的只有「监听哪个
+   事件名」和「写进哪个元素」。
+
+   ROUND10 在最前面插了第三条，并且把它做成了**默认**：真字节流（paneSubBytes，
+   /api/kore/bytes）。分界线还是「xterm 挂上来了没有」，只是挂上来之后先试字节流，起不来才
+   退到 mode=term 的抓屏帧上。所以现在三条路、一个入口（paneSubscribe）：
+     bytes  → 对面 tmux 控制模式的字节，xterm 自己解析（1.5-2.0ms，实测）
+     screen → 抓屏 + 行 diff 帧，同一个 xterm（1000ms/130ms 一拍）
+     text   → 剥了 ANSI 的纯文本进 <pre>（没有 xterm 时，验收线 D）
+   谁在哪条线上由 paneWire 记着，因为**按键那一侧要跟着分叉**：字节流上不猜本地回显、也
+   不要回执里那一屏（省掉 settle + 抓屏，真板子实测 150ms → 10ms 一发）；抓屏那条路上两件
+   都得做。写门一个字没松：仍然是 POST /api/kore/input + Bearer + confirm + 码点 hex +
+   600/min，少掉的只有**回执里那一屏**，而且是客户端自己说「我有别的路看屏」才少的。 */
+let paneTarget = null;
+let paneStream = null;        // EventSource 句柄；null = 现在没有订阅
+let paneLines = [];           // 降级路径已经收到的行，splice 的基准
+let paneTerm = null;          // xterm.js 的 Terminal 实例；null = 还没有真终端
+let paneFit = null;           // fit addon 实例；null = addon 没挂上（字号就不动）
+let paneWebgl = null;         // WebGL 渲染器实例；null = 没挂上/上下文丢了（退回 DOM 渲染器）
+let paneWheelAcc = 0;         // Ctrl+滚轮攒下来的 deltaY（像素）；过 60 才动一档字号
+let paneTermLoad = null;      // 加载那一次的 Promise —— 289KB 只拉一次
+let paneSeenAt = 0;           // 最后一帧的服务端时间戳，用来丢掉迟到的旧屏
+/* 现在这个 pane 的内容是从哪条线上来的。三个值，互斥，由 paneSubscribe() 一处写：
+     'bytes'  —— /api/kore/bytes：对面 tmux 控制模式的**真字节流**（ROUND10 的主路）。
+     'screen' —— /api/kore/stream?mode=term：抓屏 + 行 diff，喂给同一个 xterm（降级路）。
+     'text'   —— /api/kore/stream：剥了 ANSI 的纯文本，渲进 <pre>（没有 xterm 时的那条，
+                 验收线 D）。
+   为什么这个变量必须存在，而不是「有 xterm 就是字节流」：按键的那一侧要按线路分叉 ——
+   字节流上**不猜本地回显、也不要回执里那一屏**（对面的字节 2ms 就回来了，实测），而抓屏
+   那条路上两件都得做（服务端的行 diff 拿它自己上一拍作底，一个刚打进去的字在它眼里不算
+   「变了」，不靠回执就永远补不上）。两条路的按键行为不一样，所以线路得有名字。 */
+let paneWire = '';
+let paneTapFresh = false;     // 字节流：第一帧真字节还没来，屏上那张 prime 是旧的
+let paneKbd = false;          // 终端现在能不能打字。可写目标开 pane 就是 true（ROUND9）
+let paneQueue = [];           // 攒着还没发出去的码点（一发在路上的时候继续打字就落这里）
+let paneSending = false;      // 有一发 POST 在路上
+let paneFitTimer = null;      // 贴合（窗口 resize / 改字号）的防抖句柄
+let paneGeomAsked = '';       // 上一次朝对面要过的几何 'CxR'。去重用的是**要过的**，不是
+                              // 对面给的 —— 对面给回另一个数的时候不能再追着要一次，那是
+                              // 两个人抢同一个方向盘（阶段3 否掉 fitAddon.fit() 的同一条理由）
+let paneGeomBusy = false;     // 有一发 resize 在路上
+let paneGeomBorrowed = false; // 这个 pane 有没有真动过对面几何（借过）。关窗/切后台靠它决定要不要
+                              // 还（发一发 auto:true 的 resize 把 window-size 从 manual 松回 latest）。
+                              // 2026-10-13 owner 定「每设备按自己屏铺满」：还的目标不再是「第一次借之前
+                              // 对面多大」那个陈旧值（可能是旧 sidebar 页面留下的窄尺寸），而是本设备自己
+                              // 的盒子 —— 既不写一个会黏住的窄数，又照常 auto 松开让别的 client 跟自己走
+let paneFarGeom = null;       // 对面最后报过的几何（prime / hello / geom / full 帧）。不等于
+                              // 本地终端的 cols/rows：可写目标开 pane 时本地先按盒子到位，
+                              // 对面几秒后才跟上（见 paneLocalGeom / paneFitGeomNow）
+let paneFarSure = false;      // 上面那一份是不是**此刻**的真几何。hello / geom / 老路的 full
+                              // 是；prime 不是 —— 它是缓存里几秒前的那一屏
+let paneShown = false;        // 终端是不是已经揭给人看了。开 pane / 重订时先盖住(.sizing)，
+                              // 第一帧真内容(非 prime 裸快照)落地或兜底超时到点才揭
+let paneRevealT = 0;          // 盖住的兜底计时器：帧永远不来也要揭，绝不把人锁在黑屏上
+
+/* 把 vendor 里钉死版本的 xterm.js + xterm.css + addon-fit.js 挂进文档，返回「xterm 挂
+   成功了没有」（addon 挂没挂上单独看全局 FitAddon，它失败只是不调字号，不影响看屏）。
+   为什么是运行时注入，而不是在 <head> 里写死一个 `script src=` 标签：
+     ① 本页的结构断言是「全页恰好三个 <script data-zone="…"> 块，之外一个 script 标签都
+        没有」。写死一个 vendor 脚本就得给那条断言开一个例外，而例外迟早会被用来藏第四块
+        代码。注入出来的那个标签不在文档源码里，那条断言一个字都不用改，还是真的 ——
+        连「这段注释里不许出现一个光秃秃的 script 开标签」都是它在管，所以这里只能这么写。
+     ② 289KB 的终端仿真器只有真的开 pane 的人才付这个钱，只看列表的人不付。
+     ③ URL 上带 ?token=：script / link 标签发不出 Authorization 头。这跟
+        EventSource 是同一条已经批准的「只读 GET 可以用 query token」放宽；写路径一个字
+        没松，仍然只认 Bearer + POST。服务端那条 /vendor/xterm/ 路由在 _authorized 之后，
+        而且只认五个精确文件名、不拼路径，所以既要 token 又不存在 .. 穿越面。 */
+function paneLoadTerm() {
+  if (paneTermLoad) return paneTermLoad;
+  const q = TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '';
+  const grab = src => new Promise(done => {
+    const js = document.createElement('script');
+    js.src = src + q;
+    js.onload = js.onerror = done;        // 成没成不看这里，看全局有没有多出来东西
+    document.head.appendChild(js);
+  });
+  paneTermLoad = new Promise(resolve => {
+    const css = document.createElement('link');
+    css.rel = 'stylesheet';
+    css.href = '/vendor/xterm/xterm.css' + q;
+    document.head.appendChild(css);
+    // 三个脚本一起拉：addon-fit 1.5KB / addon-webgl 100KB，都是 UMD，各往全局挂一个
+    // 对象，加载顺序上不依赖 xterm.js（它们是在 loadAddon 的时候才碰 Terminal）。
+    // UMD：加载成功之后全局多一个 Terminal。`typeof` 对没声明过的标识符是安全的，所以
+    // 加载失败/被拦/吐回 404 的 HTML 都落到同一个 false 上，不会抛。
+    Promise.all([grab('/vendor/xterm/xterm.js'), grab('/vendor/xterm/addon-fit.js'),
+                 grab('/vendor/xterm/addon-webgl.js')])
+      .then(() => resolve(typeof Terminal === 'function'));
+  });
+  return paneTermLoad;
+}
+/* 真终端只建一次，之后反复用：Terminal 实例是有代价的（canvas/DOM 渲染层 + 2000 行
+   scrollback），每开一次 pane 建一个新的会把旧的留在 DOM 里泄漏。换 session 时清屏靠
+   `full` 帧自己的 reset()。
+   `disableStdin: true` 仍然是**构造时的值**，这一行没有改成 false —— 它是 xterm 自己
+   那一层的闸：CoreService.triggerDataEvent() 在 disableStdin 为真时直接 return，所以闸
+   关着的时候 onData 根本不会被调用，不是「调用了但我们不发」。翻闸只有 paneSetKbd()
+   一处，而且翻不开不可写的目标。ROUND9 之后，可写目标的 openPane 会在订阅之后立刻走那
+   一处把它翻开（见 openPane 末尾）—— 所以构造时这个 true 管的是「挂上来还没认目标」
+   那一瞬，和「不可写目标 / xterm 没挂上」这两种一直关着的情形。onData 在这里挂一次就够：
+   它是实例级的，不随闸开关装卸，闸关着时它拿不到事件，闸开着时 paneInput() 还会再自己
+   查一遍。 */
+function paneMountTerm() {
+  if (paneTerm) return paneTerm;
+  paneTerm = new Terminal({
+    convertEol: true,          // tmux 吐的是 \n；终端要的是 \r\n
+    cursorBlink: false,        // 闸关着的时候不许眨：会眨的光标在说「可以打字」
+    cursorStyle: 'block',
+    cursorInactiveStyle: 'outline',
+    disableStdin: true,
+    scrollback: 2000,
+    fontSize: paneFontGet(),   // 人定的那个数（记在 localStorage），不跟着盒子变
+    // 2026-10-13 owner：ui-monospace 在他机子上解析成系统 UI 等宽、偏粗偏丑。换一组
+    // 系统自带的经典细体编程字体，零额外加载，更接近传统终端。字体是从左往右挑第一个装了的，
+    // owner 想要 Monaco 就把 Monaco 放最前（Menlo 在前会先命中 Menlo、轮不到 Monaco）。
+    // 没设 fontWeight，正文仍 400、程序自己发的 ANSI 粗体仍走 xterm 的 700。
+    fontFamily: 'Monaco, Menlo, "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace',
+    // 2026-10-13 owner：觉得字偏重。粗体从 xterm 默认 700 降到 600 —— 终端里大量 UI 走
+    // ANSI 粗体，这一档最吃重量感。正文维持 400（Monaco 只有这一个字重，再往下设也无效，
+    // 真要正文更细得换一个自带 300 字重的字体，如 SF Mono / JetBrains Mono）。
+    fontWeight: 400,
+    fontWeightBold: 600,
+    // 2026-10-13 owner：纯黑 #000 太黑，想要他 VSCode 的 Community Material Theme
+    // Darker High Contrast。那套主题不单设 terminal.background，终端继承 editor 的
+    // #212121（深灰）+ #EEFFFF，光标是琥珀 #FFCB6B；下面 16 色是从该扩展的 theme JSON
+    // 原样取的 material ANSI 盘，让带色输出也和 VSCode 一致。
+    theme: {
+      background: '#212121', foreground: '#EEFFFF',
+      cursor: '#FFCB6B', cursorAccent: '#000000',
+      // 选区得在深灰上看得见、且选中能复制（owner 既定）：保留这组蓝底白字，
+      // 不用 xterm 默认的半透明白（压在底色上几乎分辨不出来）。
+      selectionBackground: '#2f5d8a', selectionForeground: '#ffffff',
+      black: '#000000', red: '#FF5370', green: '#C3E88D', yellow: '#FFCB6B',
+      blue: '#82AAFF', magenta: '#C792EA', cyan: '#89DDFF', white: '#ffffff',
+      brightBlack: '#4A4A4A', brightRed: '#FF5370', brightGreen: '#C3E88D',
+      brightYellow: '#FFCB6B', brightBlue: '#82AAFF', brightMagenta: '#C792EA',
+      brightCyan: '#89DDFF', brightWhite: '#ffffff',
+    },
+  });
+  paneTerm.open($('c-pane-term'));
+  paneTerm.onData(paneInput);
+  /* 手机软键盘补发（2026-10-12，owner：手机上打不出空格/数字/标点）。xterm 5.5.0 的
+     _inputEvent 只在 _keyDownSeen 为假时才转发 insertText，而软键盘的 input 事件夹在
+     keydown（常是 keyCode 229）和 keyup 中间 —— 这几类字符被整个丢掉。字母走合成
+     （compositionend）那条路、不受影响，所以表现成「字母行、空格/数字/标点不行」。
+     这里只在触屏上补 xterm 漏掉的那一类：非合成的 insertText，且 xterm 自己没转发过
+     （它转发时会 cancel → defaultPrevented）。物理键盘（iPad 外接）走 keypress 路、
+     xterm 已发过，用一个 keypress 标志挡掉重复。桌面根本不挂这段。
+     补发走 paneInput —— 它自带只读闸（paneKbd/writable），和正常输入过同一道写门。 */
+  /* iPad 等宽屏触屏仍可直接打进 xterm 的隐藏 textarea：补发软键盘漏掉的普通字符（空格/数字/
+     标点）。注意**绝不在合成中动 textarea**——那会打断输入法/语音（流式合成被 yank 掉就是
+     「自动退出」）。手机窄屏不走这条：改用下面的原生撰写框 #compose（见 paneSetKbd 的聚焦）。 */
+  if (PANE_IS_TOUCH && paneTerm.textarea) {
+    const ta = paneTerm.textarea;
+    let kp = false;                                 // 这一发 input 之前刚发生过 keypress？
+    ta.addEventListener('keydown', () => { kp = false; });
+    ta.addEventListener('keypress', () => { kp = true; });
+    ta.addEventListener('input', ev => {
+      const hadKp = kp; kp = false;
+      if (ev.isComposing || ev.inputType !== 'insertText' || !ev.data) return;
+      if (hadKp || ev.defaultPrevented) return;     // 物理键盘 / xterm 已转发：别重复
+      paneInput(ev.data);
+      ta.value = '';                                // 清掉，别在 textarea 里攒着
+    });
+  }
+  // 只读的 pane 必须看得见对面的光标。xterm 的 renderer 只在 coreService
+  // .isCursorInitialized 为真时才画光标，而那个标志只有三件事会点亮：终端拿到焦点、
+  // 用户按了键、解析到 alt-screen 切换序列（capture-pane 吐的是纯文本，没有那个序列）。
+  // 只读的 pane 这三件一件都不会发生 —— 阶段3 的真浏览器实测抓到的正是「屏上根本没有
+  // 光标」：对面在等输入、在哪一格等，看的人完全看不出来。
+  // 这里点亮它。私有字段（_core）：vendor 的版本和 sha256 是钉死的，脚下不会变；
+  // 光标的位置和样子仍然全部由对面报的 cx/cy 和 options.cursor* 决定，这一行只是把
+  // 「允许画」这个开关打开。render-test 有一条断言盯着它，换版本忘了改会翻红。
+  const core = paneTerm._core;
+  if (core && core.coreService) core.coreService.isCursorInitialized = true;
+  // fit addon 只用来**量**，不用来 fit()：见 paneBoxDims / paneFitGeomNow。
+  if (typeof FitAddon === 'object' && FitAddon && typeof FitAddon.FitAddon === 'function') {
+    paneFit = new FitAddon.FitAddon();
+    paneTerm.loadAddon(paneFit);
+  }
+  // 2026-10-12：换 WebGL 渲染器。xterm 5.5.0 默认那个是 DOM 渲染器，每个脏行都要重建
+  // 一棵 span 树；这个弹窗铺满视口的时候是 177×47 = 8319 个格子，对面一刷屏就是整个
+  // 页面最大的一笔开销（「按键到 xterm 解析完」实测 12.9ms 中位数，而那个数不含把屏幕
+  // 真画出来的那一段）。
+  // 构造就可能抛（webview 没有 WebGL / 上下文开不出来），上下文也可能中途丢；两种都
+  // 退回 DOM 渲染器 —— 慢，但不会变成一块黑屏。
+  if (typeof WebglAddon === 'object' && WebglAddon
+      && typeof WebglAddon.WebglAddon === 'function') {
+    try {
+      const gl = new WebglAddon.WebglAddon();
+      gl.onContextLoss(() => { paneWebgl = null; try { gl.dispose(); } catch (e) {} });
+      paneTerm.loadAddon(gl);
+      paneWebgl = gl;
+    } catch (e) { paneWebgl = null; }
+  }
+  // Ctrl+滚轮是改字号的手势，不许同时滚屏。xterm 自己的 wheel 监听挂在后代 .xterm 上、
+  // 比外面那个冒泡上来的处理器先跑，而它算滚多少行的时候压根不看 ctrlKey —— 不拦的话
+  // 一个滚轮刻度就是「字号变一档 + scrollback 跟着滚一截」，这正是看起来在抖的那一半。
+  // attachCustomWheelEventHandler 是公开 API，返 false = 这一发 xterm 不管。
+  if (typeof paneTerm.attachCustomWheelEventHandler === 'function') {
+    paneTerm.attachCustomWheelEventHandler(ev => !ev.ctrlKey);
+  }
+  /* 选中之后能复制（2026-10-12，owner：「这个terminal里面的东西 好像不能选中复制？」）。
+     有选区的 Ctrl/Cmd+C = 复制且不发 ^C；没选区的 Ctrl+C 还是「打断对面」那个键；
+     Ctrl+Shift+C 永远是复制。返 false = 这一发按键 xterm 不处理（也就不会发给对面）。
+     为什么原生复制在这里是空的、按键为什么得按这个分法：workbench/cards/pane-copy.md。 */
+  if (typeof paneTerm.attachCustomKeyEventHandler === 'function') {
+    paneTerm.attachCustomKeyEventHandler(ev => {
+      if (ev.type !== 'keydown') return true;
+      const k = (ev.key || '').toLowerCase();
+      if (k !== 'c' || !(ev.ctrlKey || ev.metaKey)) return true;
+      if (!ev.shiftKey && !paneTerm.hasSelection()) return true;   // ^C 照旧
+      paneCopy();
+      return false;
+    });
+  }
+  /* 本地终端不进鼠标跟踪模式（2026-10-12，owner：「复制粘贴那个功能…现在不行了」）。
+     字节流这条路把对面原始字节原样喂进来，对面那个 TUI（claude-code）开着鼠标跟踪
+     （实测都是 mouse_all + sgr）。xterm 一进鼠标跟踪，鼠标拖拽就被当成
+     鼠标事件转发、不再做原生选区 —— 人就拖不出选区、也就复制不了。老的抓屏路是纯文本、
+     不带这几发开关，所以那会儿拖拽能选中；是字节流这条路把它带了进来。
+     对面本来也不该靠本地鼠标去点（这是只读/键盘驱动的监视面，owner 要的是「选字复制」而不是
+     「用鼠标操作对面」），所以在解析器层把这几发鼠标跟踪开关单独吞掉：本地永不进鼠标模式，
+     拖拽回到原生选区。只拦鼠标跟踪那几号（1000/1002/1003… + 1005/1006/1015/1016 编码选择
+     和 1001 高亮），别的私有模式（1049 alt-screen、25 光标、2004 bracketed paste…）一律放行。
+     registerCsiHandler 是公开 API，返 true=这一发我处理了（xterm 内置不再跑、也就不设模式），
+     返 false=我不管、交回 xterm。render-test 有一条断言盯着这里。 */
+  if (paneTerm.parser && typeof paneTerm.parser.registerCsiHandler === 'function') {
+    const PANE_MOUSE_MODES = new Set([1000, 1001, 1002, 1003, 1005, 1006, 1015, 1016]);
+    // 只有这一发里**每一个**模式号都是鼠标跟踪开关时才吞；混进了别的私有模式就整发放行，
+    // 别误伤同一发里真正要生效的那个（这种混发很罕见，但宁可漏吞不可错杀）。
+    const paneSwallowMouseMode = params => {
+      let hit = false;
+      for (const p of params) {
+        const n = Array.isArray(p) ? p[0] : p;
+        if (PANE_MOUSE_MODES.has(n)) hit = true;
+        else return false;
+      }
+      return hit;
+    };
+    paneTerm.parser.registerCsiHandler({ prefix: '?', final: 'h' }, paneSwallowMouseMode);
+    paneTerm.parser.registerCsiHandler({ prefix: '?', final: 'l' }, paneSwallowMouseMode);
+  }
+  return paneTerm;
+}
+/* ROUND9 阶段4：字号是人定的常量，**对面跟着盒子变**。
+   阶段3 走的是反过来那条路（cols/rows 一个字不动，改 fontSize 让对面那 80 列正好铺满
+   盒子）。owner 在真板子上看过之后否了，原话是「字体大小显示也很莫名其妙」「只是在里面
+   放个终端 怎么这么难」。为什么必然难看：对面有的 131 列、有的 80 列，同一个
+   弹窗里这两个目标的字号要差出一倍多；窄屏上 131 列会被一路压到 6px 的地板，压到地板还
+   是装不下，于是既看不清、又切边。字号是读者唯一真正在意的那个量，让它当因变量就是把
+   方向盘交给窗口宽度。
+   所以这一轮把自由变量换过来：
+     ① 字号 = localStorage 里记着的那个数（默认 13px，没有按钮，唯一的改法是 Ctrl+滚轮），
+        和盒子多大、对面多少列全都无关；
+     ② 盒子里能摆下多少格，就把对面那个 tmux window 调成多少格 —— `tmux resize-window`，
+        ROUND9 新加的 resize 动词，和 input 同一扇门（Bearer + POST + confirm + koreops 的
+        _validate + 上下界 + 自己的 60/min）。owner 明确授权了这一笔写，并且知道他自己
+        attach 着的那个终端会跟着跳。
+   对面调不动的时候不硬来：只读目标压根不发这一发，被拒 / 还没回来的时候宿主盒子是
+   overflow:auto —— 看得见的是一个会出滚动条的完整终端，不是一个被偷偷截掉右边的终端。
+   本地 cols/rows 仍然**只由服务端报的几何说了算**（paneApplyTerm 里那一下 resize）：
+   rows 帧是按绝对行号重画的，本地先自己改列数就会让每一帧都落错位。这里要的不是「改本地
+   终端」，是「请对面改，改完了对面自己会在回执里告诉我新的几何」。 */
+const PANE_FONT_MIN = 8, PANE_FONT_MAX = 24;
+// 手机屏窄，同样字号占不下几列：触屏默认 13，桌面 14。触屏上没有改字号的手势
+// (Ctrl+滚轮是桌面的)，所以这个默认值就是手机上的最终值。matchMedia 不存在的环境
+// (无头自检)退回桌面值 14。
+const PANE_IS_TOUCH = (() => { try { return matchMedia('(pointer: coarse)').matches; } catch (e) { return false; } })();
+const PANE_FONT_DEFAULT = PANE_IS_TOUCH ? 13 : 12;  // 2026-10-13 owner：桌面默认 14 看着偏大，降到 12（手机留 13 保清晰）
+const PANE_FONT_KEY = 'kore.pane.font';
+/* 对面几何的上下界。这是服务端 policy（koreops 的 resize_min/max_cols/rows）的一份**副本**，
+   只用来「别发一发注定被拒的请求」—— 真正说不行的是服务端，这里放宽一个数也越不过去。 */
+const PANE_COLS_MIN = 20, PANE_COLS_MAX = 400, PANE_ROWS_MIN = 5, PANE_ROWS_MAX = 200;
+function paneFontGet() {
+  let raw = '';
+  try { raw = localStorage.getItem(PANE_FONT_KEY) || ''; } catch (e) { raw = ''; }
+  const f = parseFloat(raw);
+  return Number.isFinite(f)
+    ? Math.max(PANE_FONT_MIN, Math.min(PANE_FONT_MAX, Math.round(f))) : PANE_FONT_DEFAULT;
+}
+function paneSetFont(f) {
+  const want = Math.max(PANE_FONT_MIN, Math.min(PANE_FONT_MAX, Math.round(f)));
+  // 记不住不等于这一次不生效（隐私模式 / 第三方 cookie 关掉时 localStorage 会抛）。
+  try { localStorage.setItem(PANE_FONT_KEY, String(want)); } catch (e) { /* 记不住就算了 */ }
+  if (!paneTerm || paneTerm.options.fontSize === want) return want;
+  /* 改字号会把视口从底部顶上去。xterm 的 viewport 按**像素** scrollTop 记位置，行高一变，
+     同一个 scrollTop 就落在更靠上的那一行上 —— 阶段3 的真浏览器实测量到的是 font 12 →
+     16.5 时 viewportY 从 302 掉到 291：屏上看起来凭空往上翻了 11 行，而光标在第 302+29
+     行上，它直接出了可视区，renderer 连 .xterm-cursor 都不画了。
+     所以先记下「离底多少行」，改完按行号钉回去：贴底的人仍然贴底，正在往上翻历史的人也
+     还停在原来那几行上。钉两次，因为滑动分两步到：改字号那一刻 xterm 同步重算了行高，而
+     浏览器要到这一帧的渲染步骤里才派发 scroll 事件 —— xterm 的 _handleScroll 就在那里拿
+     **旧的像素 scrollTop** 除以**新的行高**，把 ydisp 算小了（真浏览器实测：只钉同步那
+     一次，600ms 后量到的还是 viewportY 389 / baseY 400）。 */
+  const fromBottom = Math.max(0, paneTerm.buffer.active.baseY
+                                 - paneTerm.buffer.active.viewportY);
+  paneTerm.options.fontSize = want;
+  const pin = () => paneTerm.scrollToLine(Math.max(0, paneTerm.buffer.active.baseY
+                                                      - fromBottom));
+  pin();
+  requestAnimationFrame(pin);
+  // 字大一档 ⇒ 同一个盒子里格子变少 ⇒ 对面也该跟着变少。立刻问，不防抖：这是一次点击，
+  // 不是拖窗口那种一秒几十发。
+  paneFitGeom(0);
+  return want;
+}
+/* 把 xterm 的选区送进剪贴板。见 workbench/cards/pane-copy.md（为什么不能靠原生复制、
+   为什么这块板子上没有 navigator.clipboard）。 */
+function paneCopy() {
+  if (!paneTerm) return false;
+  const text = paneTerm.getSelection();
+  if (!text) return false;
+  const done = ok => {
+    paneSay(ok ? ('已复制 ' + text.length + ' 字') : '复制失败');
+    return ok;
+  };
+  // execCommand 先试：这块板子是明文 HTTP，navigator.clipboard 在非安全上下文里压根不存在。
+  let ok = false;
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+  document.body.appendChild(ta);
+  try {
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    ok = document.execCommand('copy');
+  } catch (e) { ok = false; }
+  try { document.body.removeChild(ta); } catch (e) { /* 已经不在就算了 */ }
+  // 把焦点还给终端：textarea 抢过去之后不还，下一个按键就没人收了。
+  try { paneTerm.focus(); } catch (e) { /* 没挂上就算了 */ }
+  if (ok) return done(true);
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    navigator.clipboard.writeText(text).then(() => done(true), () => done(false));
+    return true;
+  }
+  return done(false);
+}
+/* 盒子现在能摆下多少格。fit addon 在这里只当**尺子**用：proposeDimensions() 就是它那段
+   「量内容区 + 减掉滚动条和 padding + 除以实测字宽」的代码，自己重写一遍等于把一个有测试、
+   钉了版本和 sha256 的东西换成一份抄走样的。它不改任何东西 —— fit() 才改，而 fit() 正是
+   阶段3 否掉的那条路。 */
+function paneBoxDims() {
+  const box = $('c-pane-term');
+  if (!paneFit || !paneTerm || !box.classList.contains('on') || !box.clientHeight) return null;
+  const p = paneFit.proposeDimensions();
+  if (!p || !Number.isFinite(p.cols) || !Number.isFinite(p.rows)) return null;
+  return { cols: Math.max(PANE_COLS_MIN, Math.min(PANE_COLS_MAX, Math.floor(p.cols))),
+           rows: Math.max(PANE_ROWS_MIN, Math.min(PANE_ROWS_MAX, Math.floor(p.rows))) };
+}
+/* 本地终端该多大。规矩只有一条：**对面说了算** —— 它在多少列上折行、CSI 定位按多少列
+   算，都只有它自己知道。本地比它宽一列，它折过的那一行到了这边就被拼成一行，再来一条
+   绝对定位的转义码就落到错的格子上。所以 paneFarSure（hello / geom / 老路的 full 报过的
+   数）一旦有了，本地就只跟它走。
+   盒子只在一个窗口里当答案：对面还**没有权威地**报过几何的时候 —— 开 pane 到 `tmux -C
+   attach` 真上来之间那 ~2.6 秒。那段时间对面正要被 paneFitGeom 调成盒子这么大，本地提前
+   到位，hello 报回来的时候就没有可跳的尺寸了。owner 说的「进去之后会抖动一下 自动resize」
+   就是原来那条路：先照对面的旧尺寸铺一遍，2.6 秒后对面调完了，屏上整块文字再跳一次。
+   prime 不算「权威地报过」：它是缓存里几秒前的那一屏，带的是对面当时的数。
+   调不动的目标（只读 / 弹窗还没布局量不出来）没有这个窗口 —— 对面不会变，跟着它走就是，
+   多出来的空间交给宿主盒子的 overflow:auto：看得见的是一个完整能滚的终端，不是被切掉右
+   边的终端。
+   代价说清楚：本地提前到位的那 2.6 秒里，prime 那张屏的文字是按对面当时的宽度折的行，
+   而我们正在把对面调成盒子这么大，所以那一屏会看起来折错。那是一张活不过 2.6 秒的占位
+   图，比每次开 pane 都抖一下便宜。 */
+function paneLocalGeom(far) {
+  if (paneFarSure && far) return far;
+  const s = paneTarget;
+  const want = s && s.writable ? paneBoxDims() : null;
+  return want || far;
+}
+/* 本地终端改尺寸的唯一入口，顺手把「宿主要不要能滚」这件事定下来。返「真的改了没有」。
+   为什么要有这么一个入口：这两件事必须同时发生。装得下的时候宿主一个滚动条都不许有
+   （见 #c-pane-term.on 那条 CSS 上面的注释：宿主一旦能滚，滚轮滚到尽头就把整块终端挪
+   一两像素），装不下的时候又必须能滚。分开写就一定会漏掉一半。 */
+function paneSetGeom(g) {
+  if (!paneTerm || !g) return false;
+  const moved = paneTerm.cols !== g.cols || paneTerm.rows !== g.rows;
+  if (moved) paneTerm.resize(g.cols, g.rows);
+  const box = paneBoxDims();
+  $('c-pane-term').classList.toggle('scroll',
+    !!box && (g.cols > box.cols || g.rows > box.rows));
+  return moved;
+}
+/* 开 pane 时「本地先到位」的那一步，带重试。只在对面还没权威报过几何的窗口里有意义
+   （paneFarSure 一真，就归 paneLocalGeom 跟着对面走）。为什么要重试：盒子量不量得出来取决
+   于它布局好没有，而 pane-open 把 body 改成 position:fixed 会触发一次重排 —— 开 pane 的那
+   一刻 clientHeight 可能瞬间读成 0，paneBoxDims 返 null、这一步静默跳过，终端就停在 xterm
+   构造的 80 列，直到后面有帧落地才跳到盒子宽，真浏览器里就是那一下「窄→跳宽」。量不出来
+   就等下一帧再试，尽早把终端调到盒子宽；上限几帧，免得异常时空转。 */
+function paneSizeToBoxSoon(tries) {
+  if (!paneTerm || paneWire !== 'bytes' || paneFarSure) return;
+  const g = paneLocalGeom(null);   // !paneFarSure ⇒ 盒子量得出来就是盒子，量不出来是 null
+  if (g) { paneSetGeom(g); return; }
+  if ((tries | 0) >= 15) return;
+  requestAnimationFrame(() => paneSizeToBoxSoon((tries | 0) + 1));
+}
+/* 请对面变成盒子量出来的那个几何。防抖：拖窗口会连着发几十个 resize 事件，而每一发是
+   一次真的写。
+   已知代价（2026-10-12 实测，owner 定的就这么留）：tmux 只重排**软折**的行。把 window
+   拉宽，应用自己硬折过的历史行（git log 的图、按 $COLUMNS 排过版的输出）永远留在旧宽度
+   上，新输出才用满新宽度 —— 于是一屏上会出现两种宽度。拉窄不会：窄是软折，还回去 tmux
+   自己重排得回来。这不是能在这边修掉的东西（对面那块历史已经那样存着了），改成「只许
+   拉窄」试过，代价是宽屏上终端固定在对面那个宽度、两边黑边，owner 要的是铺满。
+   delay=0 是「这一下是一次点击」（Ctrl+滚轮改字号、full / hello 帧落地）。 */
+function paneFitGeom(delay) {
+  clearTimeout(paneFitTimer);
+  paneFitTimer = setTimeout(paneFitGeomNow, delay === undefined ? 250 : delay);
+}
+async function paneFitGeomNow() {
+  const s = paneTarget;
+  if (!s || !paneTerm) return;
+  // 浏览器不在前台:一个贴合都不发。切后台时我们已经把 window 松回 latest(见下面
+  // visibilitychange 的 paneGeomRelease),这期间对面被别的 client 重定尺寸会吐 geom 帧 /
+  // 整屏重画,它们都会顺手勾一发 paneFitGeom —— 不挡的话会立刻又把对面借回浏览器盒子,
+  // 和让渡打架,把同一个共享 window 的别的 client 又扣住。回前台由 visibilitychange 显式再借。
+  if (document.hidden) return;
+  // 「对面现在多大」问的是**对面最后报过的那个数**，不是本地终端的 cols/rows。这两个数
+  // 原来永远相等（本地只跟着对面走），2026-10-12 之后不再是：可写目标开 pane 时本地会
+  // 先按盒子调到位（见 paneLocalGeom），拿本地去比就会得出「已经一样了」，于是对面这一
+  // 辈子也不会被调 —— 抖动没了，但终端也不铺满了。
+  // 对面一帧都还没报过（attach 还没上来）⇒ 这一发不发：不知道对面现在多大，就谈不上
+  // 「要不要调」，而且 paneBoxDims 要和对面当前几何比才知道该不该借（见下）。
+  // 等不久：最早一帧（字节流上是 prime，开流那一下就有；没有缓存屏的话是 2.6s 后的
+  // hello）落地时自己会排一次贴合。
+  if (!paneFarGeom) return;
+  const far = paneFarGeom;
+  const want = paneBoxDims();
+  if (!want) return;
+  const key = want.cols + 'x' + want.rows;
+  // 对面已经是这个尺寸了：一个字节都不发。**不记** paneGeomAsked —— 这里压根没要过，
+  // 而对面之后可能被别人调走（另一块板子、owner 自己 attach 进去拖窗口），那时候这个
+  // 几何要能再要一次。记上去的话去重键会把那一次也挡掉，终端就再也铺不满了。
+  if (want.cols === far.cols && want.rows === far.rows) return;
+  // 只读目标：不发。服务端那条 writable 规则一个字没动，这里只是不去撞那扇必然关着的门，
+  // 盒子的 overflow:auto 自己会给出一个诚实的滚动条。
+  if (!s.writable || paneGeomBusy || key === paneGeomAsked) return;
+  paneGeomAsked = key;
+  paneGeomBusy = true;
+  // 记下「这个 pane 借过对面几何」—— 关窗/切后台靠它决定要不要还（见 paneGeomRestore）。
+  paneGeomBorrowed = true;
+  try {
+    const d = await kPost('resize', { node_ip: s.node_ip, name: s.name,
+                                       cols: want.cols, rows: want.rows });
+    // 换 session 之后迟到回来的回执不许画到新目标的屏上（和 paneFlush 里同一条守卫）。
+    // 回执带着调完之后的整屏，当 rows 帧铺上去：paneApplyTerm 会按它报的新几何先
+    // resize 本地终端，再按绝对行号重画 —— 这就是「本地几何只跟着服务端报的数走」。
+    // ROUND10：字节流上不铺。对面几何一变，tmux 会吐一条 %layout-change，tap 自己就会
+    // 发一条 geom + 一发整屏重画过来（实测：从外面 `tmux resize-window` 也照样出 g）——
+    // 那条路比这张回执晚不了多少，而且它是对面的真屏，不是我们这一发顺手带回来的那一瞬。
+    if (paneTarget === s && paneWire !== 'bytes') paneEcho(d);
+  } catch (e) {
+    // 失败要说出来，而且把 asked 清掉：下一次拖窗口还能再试。不 resync、不清屏 ——
+    // 几何没变成想要的样子，屏上的内容仍然是真的，只是有滚动条。
+    paneGeomAsked = '';
+    paneState('贴合对面失败（终端仍可滚动看全）：' + e.message);
+  } finally { paneGeomBusy = false; }
+}
+/* 关 pane 的时候把对面「松开」。核心是一件事：
+     auto:true ⇒ 服务端在 resize 之后补一句 `set-option -w window-size latest`。
+     `tmux resize-window` 会把那个 window 的 window-size 钉成 manual（tmux 3.4 上实测过
+     show-options 的前后值），这个副作用比这次请求活得长：不松的话，别的 client（操作者自己
+     的终端、另一台设备的板子）再 attach / 打开同一个会话，窗口都被钉在这块盒子的尺寸上不跟它们走
+     —— 这正是 2026-10-13 手机继承桌面宽度那次翻车的根因。所以关窗/切后台**必须**发这一发 auto。
+   resize 的目标用**本设备自己的盒子**（paneBoxDims），不用「第一次借之前对面多大」那个陈旧值：
+     那个值可能是旧 sidebar 页面留下的窄尺寸，还回去反而把对面写窄、下次开先画一帧窄屏再跳宽
+     （owner 报的「切出去变窄、停一会儿变宽」）。写成本设备盒子 = 既不黏窄数，auto 又立刻松开
+     让真正 attach 的 client 跟自己走。2026-10-13 owner 定「每设备按自己屏铺满」。
+   发出去就不管了（.catch 吞掉）：关窗这一下不该因为一次网络抖动弹一个错误给人看。 */
+function paneGeomRestore(opts) {
+  // opts.keepalive：卸载路径（pagehide）走这条，让这一发 POST 在页面走人时也发得出去。
+  clearTimeout(paneFitTimer);
+  const s = paneTarget, borrowed = paneGeomBorrowed;
+  const box = paneBoxDims() || paneFarGeom;
+  paneGeomBorrowed = false;
+  paneGeomAsked = '';
+  if (!s || !borrowed || !box || !s.writable) return;
+  kPost('resize', { node_ip: s.node_ip, name: s.name,
+                     cols: box.cols, rows: box.rows, auto: true },
+         opts && opts.keepalive ? { keepalive: true } : undefined).catch(() => {});
+}
+/* 临时让渡 —— 浏览器切到后台(标签切走 / 手机锁屏回桌面)时把 window 松回 latest,但**不清**
+   paneGeomBorrowed:人还在看这个 pane、只是不在前台,回前台要再借一次(paneFitGeomNow 盒子没变
+   也会再发,因为下面清了去重键)。和关窗 paneGeomRestore 的唯一区别就是不清 borrowed 标志。
+   owner 定调:基本一个地方看,所以浏览器一旦不在前台,就该立刻把 window 松开(auto),别把同一个
+   共享 window 的别的 client(他原机器的 tmux attach / 另一台设备)扣在这块浏览器盒子的尺寸上。
+   目标同样用本设备盒子,不写陈旧窄值 —— 理由见 paneGeomRestore。 */
+function paneGeomRelease(opts) {
+  clearTimeout(paneFitTimer);
+  const s = paneTarget;
+  const box = paneBoxDims() || paneFarGeom;
+  paneGeomAsked = '';   // 去重键清掉,回前台 paneFitGeomNow 才会再借一次(盒子没变、key 一样)
+  if (!s || !paneGeomBorrowed || !box || !s.writable) return;
+  kPost('resize', { node_ip: s.node_ip, name: s.name,
+                     cols: box.cols, rows: box.rows, auto: true },
+         opts && opts.keepalive ? { keepalive: true } : undefined).catch(() => {});
+}
+/* 一帧真终端。两种 kind，共用结尾的光标收尾：
+     full  —— reset() 清干净，再把「历史 + 当屏」整段写进去。写完之后视口里正好是最后
+              rows 行 = 当屏，所以下面 rows 帧的绝对行号和视口是对齐的；历史落进 xterm
+              自己的 scrollback，滚轮回看是终端原生的，不用自己实现。
+     rows  —— 只收到变了的那几行。每行先 \x1b[m 把上一行残留的属性清掉（否则一行没闭合
+              的颜色会染到下一行），再 \x1b[<行>;1H 绝对定位，写文本，\x1b[K 擦掉这一行
+              剩下的旧字符（新文本比旧的短时必须擦，否则旧尾巴留在屏上）。
+   重绘整段期间先 \x1b[?25l 藏光标：否则它会在屏幕上跟着每一行跳一遍。最后按服务端报的
+   cursor_x/cursor_y 放回去，再按 cursor_flag 决定显不显示 —— 光标在哪、是否可见，这两件
+   事只有对面 tmux 知道，猜不出来。
+   阶段3 多了一个 `scroll`：对面这一屏相对上一屏向上滚了几行。rows 帧只在绝对行号上重画，
+   它永远不 APPEND，所以不滚的话 xterm 自己的 scrollback 从第一帧之后就不再生长，往上翻
+   只能看到开 pane 那一刻的历史、和当屏之间断一截。补的办法是**真的滚**：把光标摞到最后
+   一行，写 k 个换行，被顶出屏幕的那 k 行就进了 xterm 的 scrollback。顺序必须是先滚再补
+   dirty —— 服务端的 dirty 就是拿「滚完之后的屏」当基线算出来的（见 _screen_scroll）。
+   滚不会把正在翻历史的人拽回底部：xterm 的 BufferService.scroll() 只在 isUserScrolling
+   为假时才跟着动 ydisp。 */
+/* 把终端揭给人看（撤 .sizing）。一进来是盖住的，等真内容到位再揭 —— 盖的那一下只对人眼，
+   底下的借几何/贴合照跑。幂等：只揭一次，兜底计时器一并清掉。 */
+function paneReveal() {
+  if (paneShown) return;
+  paneShown = true;
+  clearTimeout(paneRevealT);
+  $('c-pane-term').classList.remove('sizing');
+  paneBusy(false);              // 真内容落地（或 2.6s 兜底）：停转
+}
+/* 刷新钮的「进行中」态：spin 从一次（重新）订阅开始，到首帧真内容落地或 settle 为止 ——
+   它因此是弹窗头上一个诚实的「正在连」活指示，不是一个和真实状态脱钩的动画。 */
+function paneBusy(on) { $('c-pane-refresh').classList.toggle('spin', !!on); }
+function paneApplyTerm(f) {
+  if (!paneTerm) return;
+  paneBusy(false);  // 抓屏那路有屏了：settle，停转
+  // 迟到的旧屏丢掉：阶段2 的 input 响应会带着一张更新的屏插队回来，而 SSE 那一拍可能在
+  // 它之后才到。谁的 at 大谁说了算。
+  if (f.at && paneSeenAt && f.at < paneSeenAt) return;
+  if (f.at) paneSeenAt = f.at;
+  const cols = Math.max(2, f.cols | 0), rows = Math.max(2, f.rows | 0);
+  paneFarGeom = { cols, rows };
+  if (!f.prime) paneFarSure = true;
+  /* 本地几何只跟 paneLocalGeom 的结论走（2026-10-12）。prime 那一帧带的是对面几秒前的
+     数，照它 resize 一次、2.6s 后对面调完再调回来，就是 owner 说的那一下抖动 —— 它进不了
+     paneFarSure，所以这里算出来的仍然是盒子那个数，一次 resize 都不会发生。
+     贴合照旧排（下面那条 full 的 paneFitGeom(0)）：prime 是最早一个知道对面多大的帧，
+     对面要趁 attach 这 2.6 秒里调完，hello 报回来的才会已经是最终那个数。 */
+  const lg = paneLocalGeom(paneFarGeom);
+  if (paneSetGeom(lg)) {
+    // 对面的几何变了（可能就是我们刚要的那一下，也可能是别人在别的客户端上调的）。
+    // 再量一次盒子：如果还差，paneFitGeom 会去要；如果已经一样，它什么都不发。
+    // 去重键是「要过的几何」，所以对面给回另一个数（被 tmux 自己夹到别的值、或者
+    // 有人同时在调）的时候不会变成一来一回追着改的乒乓。
+    paneFitGeom(500);
+  }
+  let out = '\x1b[?25l';
+  if (f.kind === 'full') {
+    paneTerm.reset();
+    out += f.text || '';
+  } else {
+    // 先滚，再补。滚的是「对面被顶出屏幕的那几行」，它们由此进入 xterm 的 scrollback。
+    const k = Math.max(0, Math.min(rows, f.scroll | 0));
+    if (k) out += `\x1b[m\x1b[${rows};1H` + '\n'.repeat(k);
+    for (const row of f.dirty || []) {
+      out += `\x1b[m\x1b[${(row[0] | 0) + 1};1H${row[1]}\x1b[K`;
+    }
+  }
+  out += `\x1b[m\x1b[${(f.cy | 0) + 1};${(f.cx | 0) + 1}H`;
+  paneTerm.write(out + (f.cvis ? '\x1b[?25h' : ''));
+  // full 帧 = 刚订上这条流（开 pane、重连、resync）。宿主盒子这时候才真的有尺寸，所以
+  // 这是初次贴合的时机：量盒子，要对面变成那么大。prime 也算：它是最早一个报对面几何的
+  // 帧，趁 attach 那 2.6 秒把对面调完，hello 报回来的就已经是最终那个数（没有可跳的尺寸）。
+  if (f.kind === 'full') paneFitGeom(0);
+  // prime 那张裸快照不揭（内容悬在页面中间就是它）；抓屏那条路的真 term 帧、以及输入回显
+  // 的 rows 帧都是 !prime，到这就揭。字节流的真内容走 'out' 里那一下，不经过这里。
+  if (!f.prime) paneReveal();
+  paneState(f.state);
+}
+async function openPane(s) {
+  paneTarget = s;
+  $('c-pane-title').textContent = `${s.name} @ ${s.node_ip}`;
+  $('c-pane-modal').classList.add('open');
+  panePageLock(true);
+  // 上一个 pane 借过对面的几何就已经在它自己的关窗里还掉了，这里只把本次的账本清零。
+  paneGeomBorrowed = false;
+  paneGeomAsked = '';
+  paneFarGeom = null;
+  paneFarSure = false;
+  // 上一个目标的那句一次性回话（「已复制 N 字」/「复制失败」）不许跨目标留着：它盖在
+  // 流状态上面，留下来就等于新目标的状态格头 1.5 秒说的是上一个目标的事。
+  paneFlash = '';
+  clearTimeout(paneFlashT);
+  // 先落闸，**再** await。on=false 和目标可不可写无关，一定落：这一句管的是「弹窗开着
+  // 的时候换一个 session」那条路 —— paneTarget 上面已经换成新的了，而闸还留着上一个
+  // 目标的状态，下面那个 await 在首次开 pane 时是一次真的网络加载（289KB vendor），
+  // 中间是能插进一次按键的。开着的闸不许跨目标继承，所以这里先关，开在订阅之后。
+  paneSetKbd(false);
+  // 先把 xterm 挂上再订阅：订阅的 mode 取决于挂没挂上，反过来就得先订一条错的再改。
+  // await 一个已经 resolve 的 Promise（第二次之后都是）只多一个微任务。
+  if (await paneLoadTerm()) paneMountTerm();
+  paneSubscribe(s);
+  /* 2026-10-12：**在任何一帧落地之前**就把本地终端调成盒子的大小（只有字节流这条路，
+     见下面为什么）。xterm 构造出来是 80×24，而铺满视口的盒子是 177×47 —— 原来这个差是
+     靠「prime 报对面的旧几何 → 本地照着铺一遍 → 贴合把对面调成盒子 → 2.6s 后 hello
+     报新几何 → 本地再跳一次」追回来的，人看到的就是进去之后整块文字抖那一下。
+     现在顺序反过来：本地先到位（没人看见过中间那个 80×24），对面在 attach 的这 2.6 秒里
+     被调成同一个数，hello/geom 报回来的时候两边已经一样 —— 没有可跳的尺寸。
+     只在 'bytes' 上做：抓屏那条路的帧里带着**对面的**绝对行号，本地几何必须一直等于对面
+     报的那个数，提前改会让 rows 帧画到错的行上。那条路因此一个字没动。
+     位置必须在 paneSubscribe() 之后：是它给宿主盒子挂上 .on 的（在那之前 display:none，
+     paneBoxDims 会直接返 null），而它也正是决定走哪条线、给 paneWire 赋值的地方。 */
+  paneSizeToBoxSoon();
+  /* ROUND9：可写的目标，开 pane 就是能打字的 —— 点进终端直接打，不用先点任何按钮。
+     撤掉的是「强制手动开闸」这层 UI 摩擦，不是写保护：
+       * 能不能打字仍然只由服务端算的 s.writable 说了算（paneSetKbd 里那个 can），
+         不可写的目标这里传 true 也翻不开，xterm 那层 disableStdin 一直关着；
+       * 打出去的键仍然走 kPost → POST /api/kore/input + Bearer + confirm 那一扇门，
+         仍然只以码点的十六进制过网，服务端 600/min 的限速一个字没动。
+     为什么默认改成通：这块板子上的 session 是 owner 自己的 agent（protected_sessions
+     和 deny_nodes 两份名单 2026-10-10 都清空了，「这些 session 不该受保护」是他的裁
+     定），而「开 pane 之后必须先点一下按钮才能打字」对他没有挡住任何东西，只是让每一
+     次用都多一下 —— 他的原话是「输入不能在 terminal 里面输入…体验要做的这么稀烂么」。
+     位置必须在 paneSubscribe() 之后：订阅那一步才给终端的宿主盒子挂上 .on（在那之前
+     它是 display:none），而 paneSetKbd(true) 末尾要把焦点送进终端 —— 对一个还没显示
+     的元素调 focus() 是静默失败的，闸开了但焦点没进去，人还是得自己点一下终端。
+     ROUND9 阶段4 之后这是弹窗里唯一一个「能不能打字」的信号源：按钮和那句状态词都删了
+     （owner 的原话是「派活、键盘、可打字 这些乱七八糟的东西 不知道是干啥的」），现在
+     说这件事的是光标 —— 会眨就是能打字，不眨的实心/空心块就是打不进。 */
+  paneSetKbd(true);
+}
+function paneSubscribe(s) {
+  paneUnsubscribe();
+  paneBusy(true);               // 转起来：到首帧真内容或 settle 才停（见各 stop 点）
+  paneLines = [];
+  paneQueue = [];
+  paneSeenAt = 0;
+  const term = !!paneTerm;
+  $('c-pane-term').classList.toggle('on', term);
+  $('c-pane-body').classList.toggle('off', term);
+  // 先盖住终端（有 xterm 才盖；纯文本降级那条没有可悬的裸快照，不盖）。头几帧里 prime 是对面
+  // 旧尺寸的裸快照，铺在盒子里输入行会悬在中间 —— 盖到第一帧真内容或兜底超时再揭（见 paneReveal）。
+  clearTimeout(paneRevealT);
+  paneShown = !term;
+  $('c-pane-term').classList.toggle('sizing', term);
+  // 兜底：真内容帧永远不来（attach 挂了又没走到降级）也要揭，绝不把人锁在黑屏。2.6s 对齐
+  // prime 本来就允许的那个占位窗口。
+  if (term) paneRevealT = setTimeout(paneReveal, 2600);
+  if (term) paneTerm.reset(); else $('c-pane-body').textContent = '载入中…';
+  paneState('');
+  /* 两条路的分岔口。有真终端 ⇒ 走字节流；没有 ⇒ 只能走纯文本 diff。
+     字节流起不来的时候**不是**掉到「没有终端」那条路上去：xterm 还在，只是改喂抓屏帧
+     （paneSubScreen 里的 'screen'）—— 那条路 ROUND8/9 两轮都在真板子上验过，是一条完整的
+     降级路，不是半截。谁来做这个降级：paneSubBytes 收到 err 而且一个字节都还没来过时。 */
+  return term ? paneSubBytes(s) : paneSubScreen(s);
+}
+/* ── 字节流（ROUND10 主路）────────────────────────────────────────────────
+   owner 原话：「这个终端的延迟很高。。。这么难么？jupyter那些 ssh那些咋做的」。答案是它们
+   都不抓屏：服务端手里是一个真 PTY，字节两个方向直推。这条路把读这一侧做成同一个形状 ——
+   节点上挂一个常驻 `tmux -C attach -r`（控制模式，只读，不改对面几何），`%output` 的字节
+   原样经 SSE 推到这儿，喂给 xterm。真板子实测：对面产生字节 → 这边驱动解出来，中位 1.5-2.0ms
+   （老路是 1000ms 空闲 / 130ms 打字时的一拍抓屏 + 行 diff）。
+   这条路顺手删掉了一整类 bug，而不是修它们：屏上那半截旧行、右边被切掉半个字，都是「按
+   绝对行号重画」的帧协议碰上几何变化的产物 —— 字节流里没有行号，xterm 自己是唯一的解析器，
+   对面怎么画，这边就是那样。
+   四种帧，各自只做一件事：
+     prime —— 一次缓存抓屏，**只为了 attach 的那一小会儿不是空白的**（attach + 控制模式
+              首屏比一次抓屏慢）。它允许是旧的，但不许是错形状的：第一帧真字节落地前
+              paneTapFresh 会先 reset()，所以 prime 和真屏绝不叠在一起。
+     hello —— attach 上了，对面是多大。这是初次贴合的时机（和老路的 full 帧同一个位置）。
+     out   —— 一段真字节。base64 过网（SSE 的帧分隔符是 \n\n，而终端字节里什么都有）。
+     geom  —— 对面几何变了（我们要的那一下、别人在另一个客户端上调的、或者对面自己改的）。
+              紧跟着一定有一发整屏重画的 out，所以这里只要把本地终端改成同一个尺寸。
+   err 是对面没了（%exit / session 被 kill）。EventSource 自己的 onerror 是网络断，它会自己
+   重连，所以那两件事不能混成一句话。 */
+function paneSubBytes(s) {
+  paneWire = 'bytes';
+  paneTapFresh = true;
+  // 和老路同一条已经批准的放宽：只读 GET / SSE 可以用 ?token=（写路径仍然只认
+  // Bearer + POST）。这条流在服务端是只读的 —— koreops 的 tap 用 `read` 动词过 _validate，
+  // 而 POST /api/kore/bytes 是 404（"bytes" 不在 WRITE_VERBS 里）。
+  const url = `/api/kore/bytes?node_ip=${encodeURIComponent(s.node_ip)}`
+    + `&name=${encodeURIComponent(s.name)}`
+    + (TOKEN ? `&token=${encodeURIComponent(TOKEN)}` : '');
+  const es = new EventSource(url);
+  paneStream = es;
+  let got = 0;                  // 已经落地的真字节数。0 = 这条流还没证明自己能用
+  let reconns = 0;              // 连续重连次数。一帧真字节落地就清零；累到上限就不再空转
+  es.addEventListener('prime', ev => {
+    const d = JSON.parse(ev.data);
+    if (got) return;            // 真字节已经在画了：迟到的 prime 是一张旧屏，丢掉
+    /* prime 是最早到的那一帧（缓存抓屏）。pane-open 刚把 body 改成 position:fixed，触发一次
+       重排 —— 这一刻盒子可能还量不出来（clientHeight 瞬时读成 0，paneBoxDims 返 null）。盒子
+       量不出来时 paneApplyTerm 里的 paneLocalGeom 只能退回**对面那个旧几何**，prime 就会先画
+       一帧窄的、等盒子量出来再跳宽 —— 那一跳正是 owner 报的「进去先是窄的、然后跳一下」。
+       所以盒子量不出来就把这一帧往后挪（rAF，上限 15 帧 ≈ 一两百毫秒，远小于 prime 本来就
+       允许的 2.6s 占位窗口），等盒子到位再画，prime 直接落在盒子宽上、没有中间那一跳。
+       盒子一开始就量得出来（headless、以及重排已经 flush 的常见情形）时 paint(0) 立刻画，
+       和改之前完全一样 —— 单调。got 一旦非 0（真字节已经在画）就作废这次延迟。 */
+    const paint = tries => {
+      if (got || !paneTerm) return;
+      if (!paneFarSure && !paneBoxDims() && (tries | 0) < 15) {
+        requestAnimationFrame(() => paint((tries | 0) + 1));
+        return;
+      }
+      paneApplyTerm({ kind: 'full', text: d.text || '', cols: d.cols, rows: d.rows,
+                      cx: d.cx, cy: d.cy, cvis: true, state: d.state || '连接中…',
+                      prime: true });
+    };
+    paint(0);
+  });
+  es.addEventListener('hello', ev => paneTapGeom(JSON.parse(ev.data), 0));
+  es.addEventListener('out', ev => {
+    if (!paneTerm) return;
+    const d = JSON.parse(ev.data);
+    const raw = atob(d.b64 || '');
+    if (!raw) return;
+    // atob 给的是「每个字符一个字节」的字符串；xterm 的 write 收 Uint8Array 时走的是它
+    // 自己的 UTF-8 解码器（对面吐的就是 UTF-8 字节），喂字符串会让它按码点处理，一个汉字
+    // 的三个字节就变成三个乱码字符。
+    const u8 = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) u8[i] = raw.charCodeAt(i) & 0xff;
+    // 第一帧真字节之前把 prime 那张旧屏清掉。首帧自带 400 行历史（tap 的 _paint hist=True），
+    // 所以 reset 清掉的 scrollback 由这一帧自己补回来；之后的重画（几何变、积压丢弃）不带
+    // 历史，也不 reset —— 否则每拖一次窗口就把回看历史清一次。
+    // 同一下把状态格**清空**：prime 那一帧写的是「连接中…」，而真字节已经在画了 —— 那句
+    // 话从这一刻起是假的，而且没有第二个人会来盖掉它（这条路上没有一拍一拍的帧，状态格只
+    // 有 paneState 一个主人）。真板子上看到的就是一个连上了还一直说「连接中…」的格子。
+    // 清空而不是写一句「字节流」（2026-10-12，owner：「上面显示字节流这几个字 不知道是在
+    // 干啥」）：那是这边的两条取屏实现之一的名字，看屏的人既不需要知道、也做不了什么。
+    // 这一格只在**出事**的时候说话 —— 退回抓屏、断线重连、对面结束、按键被拒、贴合失败。
+    // 一切正常就是空的，而「正常」本来就该由屏上那个会动的终端自己说。
+    if (paneTapFresh) {
+      paneTapFresh = false;
+      paneTerm.reset();
+      paneState('');
+    }
+    got += u8.length;
+    reconns = 0;                // 流又活了：重连计数清零
+    paneTerm.write(u8);
+    // 第一帧真字节带着 400 行历史（主屏那条路），落到盒子底、输入行就在最底 —— 这才揭终端，
+    // 把前面 prime 那张「悬在中间」的裸快照整个盖过去。alt-screen 没历史的那种，这帧就是对面
+    // 当屏，紧跟着 resize 填满，也比盖着的 prime 强。
+    paneReveal();
+  });
+  es.addEventListener('geom', ev => paneTapGeom(JSON.parse(ev.data), 500));
+  es.addEventListener('err', ev => {
+    const d = JSON.parse(ev.data);
+    if (!got) {
+      // 一个字节都没来过 ⇒ 这条流没能用起来（attach 失败、超了服务端 tap_max_streams、
+      // 对面压根不在）。退回抓屏那条路：xterm 还在，看到的仍然是真 TUI，只是慢一拍。
+      es.close();
+      paneStream = null;
+      paneSubScreen(s);
+      paneState('字节流起不来，退回抓屏：' + (d.error || ''));
+      return;
+    }
+    // 来过字节 ⇒ 这是对面真的没了（%exit / kill-session）。不重订：重订只会再撞一次同一
+    // 件事，而屏上那份最后的内容是真的，留着比清掉有用。
+    es.close();
+    paneStream = null;
+    paneBusy(false);            // 对面没了：settle，停转
+    paneState('对面结束了：' + (d.error || ''));
+  });
+  es.onerror = () => {
+    // 浏览器原生会按同一 URL 悄悄重开 —— 服务端那边是新开一个 tap，重放 prime + 400 行历史。
+    // 不先 reset 的话这 400 行会 append 在已有 scrollback 后面画重（got>0 时首帧 out 不再走上面
+    // 那个 reset 分支）。所以这里把 paneTapFresh 立回 true：重连后的首帧 out 会先清屏再由它自带的
+    // 历史补回来，去重，且只在真重连时闪一次。
+    paneTapFresh = true;
+    reconns += 1;
+    // 要么浏览器已经判这条流死透（CLOSED），要么我们连重连都试腻了：别永远卡在「重连中…」。
+    // 一个字节都没来过 ⇒ 退回抓屏那条完整降级路；来过字节 ⇒ 屏上最后一帧是真的，留着并说清楚。
+    if (es.readyState === EventSource.CLOSED || reconns > 5) {
+      es.close();
+      paneStream = null;
+      paneBusy(false);          // 不再重连了：settle，停转（抓屏那路由它自己的首帧再停一次）
+      if (!got) { paneSubScreen(s); paneState('字节流起不来，退回抓屏'); }
+      else paneState('连接断了，屏上是最后一帧真屏');
+      return;
+    }
+    paneBusy(true);             // 真在重连：转起来，直到首帧真内容落地
+    paneState('断线重连中…');
+  };
+  return es;
+}
+/* 对面报的几何 → 本地终端的几何，然后再量一次盒子。
+   hello / geom 都是对面**此刻**的真几何（不是 prime 那张缓存屏），所以这里把 paneFarSure
+   立起来：从这一刻起本地只跟着对面走（为什么：见 paneLocalGeom）。
+   去重和防乒乓在 paneFitGeom / paneGeomAsked 里，和老路共用那一套：对面给回另一个数的时候
+   不会变成一来一回追着改。 */
+function paneTapGeom(d, delay) {
+  if (!paneTerm) return;
+  const cols = Math.max(2, d.cols | 0), rows = Math.max(2, d.rows | 0);
+  paneFarGeom = { cols, rows };
+  paneFarSure = true;
+  paneSetGeom(paneLocalGeom(paneFarGeom));
+  paneFitGeom(delay);
+}
+/* 抓屏那条路。ROUND8/9 的那条流，一个字没改，只是从 paneSubscribe 里挪出来并多了个名字：
+   现在它有两个用户 —— 没有 xterm 的纯文本降级（'text'），和字节流起不来时的 'screen'。 */
+function paneSubScreen(s) {
+  const term = !!paneTerm;
+  paneWire = term ? 'screen' : 'text';
+  /* 定位用 node_ip + name，和它替代的 /api/kore/read 完全同口径 —— 没有任何一个叫
+     session 的参数。那个词在这里指 tmux session，而观察 Tab 的「当前 session」是另一
+     个东西；控制区的 /api/kore/ URL 一旦带上它，「操控半边不知道观察半边有 session 切换
+     器」那三条结构断言就会同时变红，而本轮没有授权动跨 Tab 零耦合。
+     token 从 TOKEN 常量拼，不在这里重新读一遍 location.search —— 一个真相来源就是开页
+     那一次解析出来的 TOKEN。EventSource 发不了 Authorization 头，所以这里走 ?token=：只读
+     GET 的放宽（owner 2026-10-10 裁），写路径一个字没松，仍然只认 Bearer + POST。 */
+  const url = `/api/kore/stream?node_ip=${encodeURIComponent(s.node_ip)}`
+    + `&name=${encodeURIComponent(s.name)}&lines=400`
+    + (term ? '&mode=term' : '')
+    + (TOKEN ? `&token=${encodeURIComponent(TOKEN)}` : '');
+  const es = new EventSource(url);
+  paneStream = es;
+  es.addEventListener('patch', ev => paneApply(JSON.parse(ev.data)));
+  es.addEventListener('term', ev => paneApplyTerm(JSON.parse(ev.data)));
+  es.addEventListener('err', ev => {
+    const d = JSON.parse(ev.data);
+    paneBusy(false);  // 读取失败：settle，停转
+    paneState('读取失败');
+    if (!paneLines.length && !paneTerm) $('c-pane-body').textContent = '读取失败：' + (d.error || '');
+  });
+  es.onerror = () => {
+    // EventSource 自己会重连，所以这里只说状态，**不清 body** —— 把已经读到的几百行
+    // 清掉换一句「断线」，是用一次网络抖动惩罚正在读日志的人。
+    paneState('断线重连中…');
+  };
+  return es;
+}
+function paneApply(patch) {
+  const box = $('c-pane-body');
+  paneBusy(false);  // 纯文本降级也有内容了：settle，停转
+  // 粘底：照 renderTrace() 那套唯一的房屋惯例。先量，再改，只有本来就在底部才跟着
+  // 走 —— 用户滚上去翻历史的时候，一秒一帧的推送绝不能把视口拽回去。
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+  paneLines = paneLines.slice(0, patch.from).concat(patch.lines || []);
+  paneState(patch.state);
+  box.textContent = paneLines.length ? paneLines.join('\n') : '(空 pane)';
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+function paneUnsubscribe() {
+  if (paneStream) { paneStream.close(); paneStream = null; }
+  paneWire = '';
+}
+/* 「刷新」按钮留着，但语义变了：它现在是**手动重连**，SSE 不可用（没有 EventSource、
+   被中间层掐了、超了服务端 8 条上限）时的降级路径。 */
+function refreshPane() {
+  if (paneTarget) paneSubscribe(paneTarget);
+}
+/* ROUND9：本地回显猜错之后的唯一一条纠正路（见 paneInput 里那段注释的第③条）。
+   重新订阅 ⇒ 服务端那条流的 first 又是 True ⇒ 下来一个 full 帧，带 400 行历史 ——
+   reset() 清掉的 scrollback 由这一帧自己补回来（阶段1 那条「full 帧自己也 reset」的
+   断言就是在说这件事）。只在「这一批没落到对面」的两条错路上调，正常打字不走这里：
+   每敲一个键重订一次流，才是把回看历史换成一个 bug。 */
+function paneResync() {
+  if (paneTerm && paneTarget) paneSubscribe(paneTarget);
+}
+
+/* ── 键盘直通（ROUND8 阶段2 建；ROUND9 把默认翻过来，阶段4 把控件全删）────────
+   要做的事一句话：在终端里按的键，原样落到对面 tmux pane 里。做法上有四个决定，每一个
+   都和「写保护边界不许破」直接相关：
+
+   ① 闸只跟着目标的可写性走：可写就是通的，不可写就永远打不进，**没有任何控件能翻它**。
+      ROUND8 当初是反的 —— 默认关着、必须先点一次才能打字，理由是「开 pane 最常见的动作
+      是看，不是打字，接通键盘不该是免费的」。那条理由在这块板子上不成立：名单里是 owner
+      自己的 agent（protected_sessions / deny_nodes 两份名单 2026-10-10 都清空了），强制
+      手动开闸挡不住任何一次误触 —— 它只是让每一次正常使用都多一下。ROUND9 阶段4 又把那
+      颗「键盘：可打字/已锁」的按钮和那句状态词一起删了（owner：「派活、键盘、可打字 这些
+      乱七八糟的东西 不知道是干啥的」）：手动锁成只读这件事，在一块所有 session 都是自己
+      的板子上没有读者。删掉的是 UI，不是闸 —— can 里那条 paneTarget.writable 一个字没动，
+      不可写的目标 disableStdin 一直关着（onData 压根不触发），而「现在能不能打字」这件事
+      由光标自己说：会眨 = 能打，死块 = 打不进（paneSetKbd 里的 cursorBlink）。
+   ② 键的翻译不自己写。方向键 → `\x1b[A`、Ctrl-C → `\x03`、Home/PgUp/功能键/IME/粘贴，
+      全是 xterm.js 的 onData 已经按真终端规矩给好的字节；自己再写一张映射表，就是把
+      一个有自己测试、被我们钉死了版本和 sha256 的东西，换成一张迟早和真终端对不上的
+      表。所以这里只做一件事：把 onData 给的那串字符按**码点**转成十六进制。
+   ③ 走的是和那几个写按钮同一条门：kPost() → POST /api/kore/<verb> + Bearer 头 +
+      confirm 串。没有新端点、没有 WebSocket、没有「为了低延迟」开的 GET 后门 ——
+      /api/kore/input 在服务端只长在 do_POST 里，GET 打它是 404（stage2-gate.py 实测）。
+      码点这个口径顺带把注入面也抹平了：hex 的字母表是 `[0-9a-f ]`，一个引号、一个
+      反引号、一个 `$` 都表达不出来，到不了对面的 shell。
+   ④ 不排队定时器，靠「一发在路上就不发第二发」自己限流。打字比网络快的时候，键落进
+      paneQueue，上一发回来再一次性发出去 —— 一次往返一个批次，所以请求频率天然等于
+      往返时延的倒数（实测 ~3-5 发/秒），600/分钟那条服务端限速永远不会被正常打字撞到，
+      而粘贴一大段本来就是一次 onData = 一个批次。setTimeout 节流反而会给同一件事引入
+      第二个时序来源。 */
+function paneSetKbd(on) {
+  // 可写性是服务端算的（roster 的 s.writable，受 protected_sessions / deny_nodes /
+  // 节点存活三条规则约束），这里不猜、也不复算：不可写就根本翻不开。
+  const can = !!(paneTarget && paneTarget.writable && paneTerm);
+  paneKbd = !!on && can;
+  // 额外按键条只在「终端可写」时出现（CSS 还叠加了手机断点）；关闸时把黏住的 Ctrl 松开。
+  $('c-pane-modal').classList.toggle('kbd', paneKbd);
+  if (!paneKbd) paneSetCtrl(false);
+  if (paneTerm) {
+    paneTerm.options.disableStdin = !paneKbd;
+    // 光标会眨 = 「这儿可以打字」。阶段4 删掉按钮之后这是唯一的那个信号，所以它必须准：
+    // 打不进的时候它得是块死的，cursorInactiveStyle:'outline' 在失焦时画成空心框，
+    // 和真终端失焦一个样。
+    paneTerm.options.cursorBlink = paneKbd;
+  }
+  if (!paneKbd) {
+    // 闸一关，攒着的键就作废。这是「关闸」的意思：不是先关了再把积压的偷偷打完。
+    paneQueue = [];
+    // 焦点也得交出去。留在 textarea 上的话，按键被 disableStdin 默默吃掉，人以为在打字
+    // 其实什么都没发生 —— 比「打不进去」更糟的是「看不出打不进去」。
+    if (paneTerm) paneTerm.blur();
+  } else if (paneTerm) {
+    // 手机窄屏：聚焦原生撰写框（输入法/语音在这里才正常），不碰 xterm 的隐藏 textarea；
+    // 平板/桌面：照旧聚焦 xterm，直接打进终端。
+    const narrowTouch = PANE_IS_TOUCH && window.matchMedia('(max-width:860px)').matches;
+    const ci = narrowTouch && $('compose-in');
+    if (ci) ci.focus(); else paneTerm.focus();   // 开完闸还要再点一下才能打字，等于闸开了一半
+  }
+  paneState();
+}
+/* 弹窗头上那一格有过两个主人，这是 ROUND9 的真浏览器实测逼出来的一条改动：原来
+   paneSetKbd() 直接往 #c-pane-state 写一句「键盘直通：开…」，而流那一侧每收一拍 SSE 帧
+   就拿 f.state 把同一格原地盖掉 —— 单测里看不出来（桩不推帧），真板子上量到的是 "idle"。
+   一秒就没的提示不是状态指示。
+   阶段4 把抢那一格的另一个主人直接删了：键盘那半（「可打字 / 已锁」）不再往这里写，因为
+   「能不能打字」已经由光标自己说了。所以这一格现在只有一个主人、一句话 —— 流那一侧的
+   状态（帧带的 state、回执、被拒的原因、贴合失败的原因）。 */
+let paneFeedState = '';
+/* 临时盖在流状态上的一句话（2026-10-12，为了「复制成功了没有」有个说法）。它不是第二个
+   主人：往那一格赋值的地方仍然只有 paneState() 一处，这里只是「现在该显示哪一句」。
+   盖，而不是改 paneFeedState：复制过程中流那一侧照样在推状态，1.5 秒后让位时要还的是
+   那个**当时**的状态，不是复制前存的旧值。 */
+let paneFlash = '', paneFlashT = 0;
+function paneState(feed) {
+  if (feed !== undefined) paneFeedState = feed || '';
+  $('c-pane-state').textContent = paneFlash || paneFeedState;
+}
+function paneSay(msg) {
+  paneFlash = msg;
+  paneState();
+  clearTimeout(paneFlashT);
+  paneFlashT = setTimeout(() => { paneFlash = ''; paneState(); }, 1500);
+}
+/* xterm 的 onData。拿到的已经是终端该收到的那串字符，按码点转十六进制 —— 不是按 UTF-8
+   字节：`tmux send-keys -H` 收的是键值，一个 CJK 字符是一个键（4e2d），不是三个字节。
+   阶段3 的粘贴走的就是这里：xterm 把 textarea 上的 paste 事件（以及输入法的
+   insertText）都归到同一个 onData，所以「粘贴」不是一条新路，是一次很长的 data ——
+   这也是批上限必须在这儿的原因。两点要说明白：
+     ① 一次 onData 一批，不按键拆：粘贴 200 个字符是一发 POST，不是 200 发。
+     ② 超过 PANE_PASTE_MAX 的整批**拒掉，不截断**。截断过的粘贴比没粘上危险得多 ——
+        对面收到的是一句话的前半截，而对面是个会照着执行的 agent。
+   粘贴多行就是多个回车，和真终端一个样（bracketed paste 没法转发：对面开没开这个模式
+   只有对面自己知道，tmux 的 capture-pane 不会告诉我们）。 */
+/* 本地回显能不能猜这一批：只猜「纯可打印」的那种。
+   控制字符（<0x20、0x7f）和 \x1b 开头的序列在对面的效果取决于对面此刻是什么程序、什么
+   模式 —— 方向键在 vim 里移光标、在 bash 里翻历史、在 claude-code 里可能是选菜单；回车
+   可能换行也可能提交。猜错了屏上就是一句假话，而这个 pane 上坐着一个会照着执行的 agent。
+   所以控制键一律不猜，等真屏回来（那条路本来就在，只是慢一拍）。 */
+const paneEchoable = s => typeof s === 'string' && !!s && !/[\u0000-\u001f\u007f]/.test(s);
+const PANE_PASTE_MAX = 2048;
+function paneInput(data) {
+  if (!paneKbd || !paneTarget || !paneTarget.writable) return;
+  if (typeof data !== 'string' || !data) return;
+  // Termux 式黏一次 Ctrl：armed 时把下一个单字符改写成控制码（c→^C），然后自动松开。
+  // 对软键盘打进来的字符同样生效（它也走这条 onData→paneInput）。多字符（如方向键转义序列）
+  // 不改写，但一样把 Ctrl 松开。
+  if (paneCtrl) {
+    if ([...data].length === 1) data = String.fromCharCode(data.charCodeAt(0) & 0x1f);
+    paneSetCtrl(false);
+  }
+  const cps = [...data];
+  if (cps.length > PANE_PASTE_MAX) {
+    paneState(`这一批 ${cps.length} 个字符，上限 ${PANE_PASTE_MAX}`);
+    note(`粘贴了 ${cps.length} 个字符，超过一批 ${PANE_PASTE_MAX} 的上限：整批没发`, true);
+    return;
+  }
+  /* ROUND9 方案 C①：本地回显。可打印的这一批先在本地画一份，不等对面的屏回来 ——
+     和 ssh/mosh 一个路子。改之前每一个键都要等那一发 input 的 200 把「打完之后的那一屏」
+     带回来才看得见（真板子实测 ≈0.2s/批，而且 paneSending 串着发，连打的时候是一卡一卡
+     地往外蹦），这就是 owner 说的黏滞感。
+     三件事必须说清楚：
+       ① 这一份**只是显示层**。真正送到对面的仍然只有下面那条 kPost 队列 —— 写门
+          （Bearer + POST + confirm + 码点 hex + 600/min）一个字节都没绕。
+       ② 猜错会自愈，而且不是靠「下一拍 SSE 帧」：SSE 的 rows 帧是服务端拿**它自己上一拍**
+          做的行 diff，一个从没送出去的字在它眼里不算「变了」，它永远不会把那一行发给我。
+          真正纠正它的是这一发 input 的回执 —— paneEcho() 把整屏每一行都重写一遍（不是
+          只写 dirty），所以不管对面到底显不显示这个字（密码提示、vim 普通模式、TUI 自己
+          重画），一个来回之后屏上就是对面的真屏。
+       ③ 正因为②，**被拒的那一批没有回执，也就没有纠正**。那条路在 paneFlush 的 catch
+          里单独重新订阅一次（full 帧带着 400 行历史回来），不留着一句假话在屏上。
+     放在上限检查**之后**：超限的整批是拒掉不发的，那种批次一个字节都不许画。
+     ROUND10：这一份只在**抓屏那条线上**画（paneWire === 'screen'）。字节流上不画，不是
+     为了省事 —— 是因为它在那条线上只会添乱：对面的真字节 1.5-2.0ms 就回来了（实测），
+     本地先画一份，等于在真字节之前插一个来源不同的字，猜对了是重复一次、猜错了要等整屏
+     重画才消。打字的端到端延迟由那一发 POST 决定（echo:false 之后实测 10ms + 一个网络
+     跳），本来就已经低于人能看出来的那一档。 */
+  if (paneTerm && paneWire === 'screen' && paneEchoable(data)) paneTerm.write(data);
+  for (const ch of cps) paneQueue.push(ch.codePointAt(0).toString(16));
+  paneFlush();
+}
+function paneFlush() {
+  if (paneSending || !paneQueue.length || !paneTarget || !paneKbd) return;
+  // 256 一批，服务端上限是 512 码点：留一半余量，粘贴一大段就切成几批连着发，
+  // 而不是被服务端整批拒掉。
+  const batch = paneQueue.splice(0, 256);
+  paneSending = true;
+  const target = paneTarget;
+  /* ROUND10：字节流在的时候，回执里那一屏不要了 —— `echo: false`。
+     为什么它是纯减法：这一屏的唯一用途是「让浏览器看见自己刚打的字」（服务端的行 diff 拿
+     它自己上一拍作底，从没送出去的字在它眼里不算变过，所以抓屏那条路离了它就真的补不上）。
+     字节流上这个用途没了，而代价一直都在：服务端为了这一屏要等 input_settle_s=0.12s 再抓
+     一整屏 ANSI，真板子上实测整发 150ms；去掉之后同一扇门实测 10ms（8198 上各打四发量的）。
+     owner 说的「发送好像 也有点不正常」就是这 150ms —— 不是丢键（ledger 里每一批都是
+     accepted ok=True），是一发在路上时后面的键在 paneQueue 里等，连打变成一卡一卡地蹦。
+     门一道没少：仍然 POST + Bearer + confirm + 码点 hex + 服务端 _validate + 600/min。
+     串行（paneSending）也保留 —— 它管的是**顺序**不是延迟：两发并发出去，到对面的先后由
+     网络决定，一个方向键的三个字节就可能被劈开。 */
+  const tap = paneWire === 'bytes';
+  kPost('input', { node_ip: target.node_ip, name: target.name, hex: batch.join(' '),
+                    ...(tap ? { echo: false } : {}) })
+    .then(d => {
+      // 换 session 之后迟到回来的回显不许画到新目标的屏上。
+      if (paneTarget !== target) return;
+      if (!tap) { paneEcho(d); return; }
+      // 字节流上回执里没有屏，只有「落下去了没有」。落下去了什么都不用做 —— 对面产生的
+      // 字节自己会从那条流上过来，而那才是真的屏。
+      if (!d.ok) paneState('按键没落下去：' + (d.error || '对面没给回执'));
+    })
+    .catch(e => {
+      // 被拒绝（限速、不可写、session 没了）要说出来。剩下攒着的也一起丢掉 —— 一批被拒
+      // 之后继续把后面的键打进去，等于让一串按键在半中间断开，对面看到的是一句被截断的
+      // 东西。
+      paneQueue = [];
+      // ROUND9 方案 C① 的收尾：这一批被拒了，它的本地回显就是一句假话，而且**没有回执会
+      // 来纠正它** —— 服务端的行 diff 是拿它自己上一张抓屏比出来的，一个从没送出去的字在
+      // 它眼里压根没变过，所以那几个假字会一直赖在屏上。只有重新订一次才拉得回真屏（full
+      // 帧带着 400 行历史）。代价说清楚：这一下会 reset，回看历史要重新载入、屏会闪一下 ——
+      // 原来这里写的是「不清屏」，有了本地回显之后那句话不再成立。被拒是罕见路径（限速 /
+      // 不可写 / session 没了），正常打字一次都不走这里。
+      // 顺序要紧：先 resync 再写状态。paneSubscribe() 自己会把那一格清成 ''，反过来写就是
+      // 刚说出原因又立刻被自己擦掉（真板子上就是这么红的）。
+      // ROUND10：字节流上不 resync。那一下的全部作用是「把本地回显那句假话换成真屏」，而
+      // 字节流上屏上压根没有本地猜出来的字 —— 真屏一直在。拿一次 2.6s 的重 attach 去修一
+      // 个不存在的假字是净损失，而且会把回看历史清一次。
+      if (paneWire !== 'bytes') paneResync();
+      paneState('按键被拒：' + e.message);
+      note('input 被拒绝：' + e.message, true);
+    })
+    // finally 而不是 then：上面的 .catch 自己万一抛了（paneResync/paneSubscribe/note 理论上
+    // 会），链路变 rejected，只有 fulfillment 的 then 不跑，paneSending 永久 true 把输入全锁死。
+    // finally 不论成败都复位，和 paneGeomBusy 那套 finally 一个风格。
+    .finally(() => {
+      paneSending = false;
+      if (paneQueue.length) paneFlush();
+    });
+}
+/* 回显：POST 的 200 带回来的是**这批键打完之后的那一屏**（服务端一次 sh() 里 send-keys
+   + settle + capture，所以它就是这批键产生的屏，不是别人那一拍的屏）。
+   当成 rows 帧铺上去，不当 full：full 会 reset()，而 reset 清 scrollback —— 每敲一个
+   键就把回看历史清一次，那是把一个功能换成一个 bug。rows 这条路照样整屏重画（服务端
+   给的是整屏），只是不清历史、不闪。
+   at 用服务端的 fetched_at（和 SSE 帧的 at 同一个进程、同一个时钟），所以紧跟着来的
+   那一拍「拍下来的时候还没有这批键」的旧屏会被 paneApplyTerm 自己丢掉。 */
+function paneEcho(d) {
+  if (!d || !d.ok) {
+    // 同上：没落下去 ⇒ 屏上那份本地回显是假的，重新订一次把真屏拉回来。
+    // 先 resync 再写状态，理由和上面那条 catch 一样。
+    paneResync();
+    paneState('按键没落下去：' + ((d && d.error) || '对面没给回执'));
+    return;
+  }
+  if (!paneTerm) return;       // 降级路径：下一拍 SSE 的纯文本 diff 自己会把屏补上
+  const screen = String(d.output || '');
+  paneApplyTerm({ kind: 'rows', dirty: screen.split('\n').map((ln, i) => [i, ln]),
+                  cols: d.cols, rows: d.rows, cx: d.cursor_x, cy: d.cursor_y,
+                  cvis: d.cursor_vis, state: d.state, at: d.fetched_at });
+}
+
+/* ── kore controls ── */
+/* 唯一的 force 重扫入口。平时 kTick 不带 force（命中 server 120s cluster 缓存，秒回），
+   只有点这颗才带 force=1 真逐个扫存活节点。转圈挂在这颗上、只在这一下 —— 读缓存本来就快，
+   不转。kTick 自己把网络错吞成 ok:false（renderK 会把失败说出来），所以这里不会抛，
+   finally 保证转圈一定停。 */
+$('c-refresh').onclick = async ev => {
+  const b = ev.currentTarget;
+  if (b.classList.contains('spin')) return;      // 正在重扫就别叠一发
+  b.classList.add('spin'); b.disabled = true;
+  note('重扫全集群…（坏节点各付一次 ~35s 超时）');
+  try { await kTick(true); note('已刷新'); }
+  finally { b.classList.remove('spin'); b.disabled = false; }
+};
+$('c-new').onclick = () => $('c-form').classList.toggle('open');
+$('c-f-cancel').onclick = () => $('c-form').classList.remove('open');
+$('c-f-go').onclick = async () => {
+  const name = $('c-f-name').value.trim();
+  if (!name) { note('起 session 需要一个名字', true); return; }
+  $('c-f-go').disabled = true;
+  try {
+    await kPost('start', { node_ip: $('c-f-node').value, name,
+                          cwd: $('c-f-cwd').value.trim() || '~', role: $('c-f-role').value.trim() });
+    $('c-form').classList.remove('open');
+    $('c-f-name').value = '';
+    note(`已提交：起 ${kPrefix}${name}`);
+    setTimeout(() => kTick(true), 3000);
+  } catch (e) { note('被拒绝：' + e.message, true); }
+  $('c-f-go').disabled = false;
+};
+
+/* 2026-10-19 域轴重构：原「RSI session 入口」整块（kLoopSlug/Validate/Start/Stop/Send、撰写框
+   双模、chip 行、kLoopConvo 第二 transcript、起/停/发写门）已迁进 rsi 域脚本块（data-zone="rsi"）。
+   这块现在只剩纯 kore 域 —— roster 列表交互、pane 弹窗、kPost(/api/kore/)。 */
+
+$('c-list').addEventListener('click', async ev => {
+  // 2026-10-13 owner：行上只挂两颗钮 —— 星标（置顶）和杀（两步确认，见 kKillClick）；打断/催
+  // 这类终端里本就能做的不挂。点钮的两条在 data-act 里分流，点行其它任意处 → 开终端。
+  const b = ev.target.closest('button[data-act]');
+  if (b) {
+    const s = kRows[+b.dataset.i];
+    if (!s) return;
+    if (b.dataset.act === 'star') kToggleStar(s);
+    else if (b.dataset.act === 'kill') kKillClick(s);
+    return;
+  }
+  // 整行点击 → 开终端（pane 是全功能终端，直接打字/按 Esc）。和 Enter 键同一条只读路径。
+  // 开终端前先撤掉任何待命中的杀：换了焦点就不该还留着一颗红「确认杀」等人误点。
+  kKillDisarm();
+  const row = ev.target.closest('.k-row[id^="c-row-"]');
+  if (!row) return;
+  const s = kRows[+row.id.slice(6)];   // 'c-row-'.length === 6
+  if (s) openTab(s);
+});
+async function kWrite(verb, s, params) {
+  /* 打本看板自己所在的 session 多问一次。
+     2026-10-13 owner 把名单每行上的写键整排撤了，现在 kWrite 只剩一个钩子点：pane 头条
+     那颗「杀」（stop）。「起」走 kPost，它建的是一个还不存在的 session，自指不可能；pane
+     里的按键和贴合几何也直接走 kPost（一次按键问一次「这是不是你自己」没有读者，而那条路
+     的目标就是人正在看的这一屏，不存在「打错了谁」）。
+     `s.is_self` 是服务端 roster 算的（koreops.self_session()，动态识别，认不出来就是 false），
+     所以这里不猜。服务端的拒绝逻辑一个字没动：这只是多一次确认，不是多一道闸。 */
+  // 返回「原因串」：空串 '' = 提交成功；非空 = 没提交（自指取消 / 服务端拒 / 网络）。
+  // 2026-10-13：杀钮在整屏 pane 弹窗里，而 note() 写的 #c-note 吐司条在弹窗背后看不见
+  //（owner 报「点了没反应」就是这个）。所以把结果如实回给调用方，让它在能看见的地方（弹窗内 /
+  // 阻塞 alert）自己说，并据此决定关不关 pane。note() 仍照打，给将来不在弹窗里的调用方留着。
+  if (s.is_self && !window.confirm(
+      `${s.name} 就是本看板自己运行所在的 session。${verb} 打上去会动到你正在看的这块板子` +
+      `（停会直接 kill 掉它）。确定继续？`)) {
+    note(`已取消：${verb} 的目标是本看板自己所在的 session`, true);
+    return '已取消：目标是本看板自己所在的 session';
+  }
+  try {
+    const j = await kPost(verb, { node_ip: s.node_ip, name: s.name, ...params });
+    note(`已提交 ${verb} ${s.name} · job ${String(j.id || '').slice(0, 8)}`);
+    setTimeout(() => kTick(true), 2000);
+    return '';
+  } catch (e) { note(`${verb} 被拒绝：${e.message}`, true); return e.message || '被拒绝'; }
+}
+
+/* ── pane 弹窗的控件（全部可写，全部在操控 Tab 里）── */
+/* 关 pane 的三条路径（按钮 / 点遮罩 / 全局 Esc）都汇到这一个 onclick，所以
+   paneUnsubscribe() 只挂这一处就够了，不会有哪条路径悄悄留着连接不放。
+   注意 showTab() 不关弹窗：切到观察 Tab 再切回来，订阅还活着、内容还在，这是对的，
+   不是泄漏 —— 释放的触发条件是关弹窗，不是看不见。 */
+$('c-pane-close').onclick = () => {
+  const was = paneTarget;
+  paneUnsubscribe();
+  // 关闸要在清 paneTarget 之前：paneSetKbd() 要靠它判断可写性，顺序颠倒就会把闸留在
+  // 开着的状态，下一次开 pane 的头一个微任务里按的键会直接落到新目标上。
+  paneSetKbd(false);
+  // 同理在清 paneTarget 之前：借来的几何要还给这个目标，而 paneGeomRestore 自己要点名它。
+  paneGeomRestore();
+  $('c-pane-modal').classList.remove('open');
+  panePageLock(false);
+  paneTarget = null;
+  paneRestoreFocus(was);
+  // 弹窗开着的这段时间操控侧轮询是停着的（它被整屏挡住了，画了没人看 —— 见 shell 区
+  // 的 pollLive）。关的这一刻补一拍，但**不重扫集群**：roster 现在只在加载/手动刷新/写后
+  // 刷（2026-10-12 owner 改成读缓存+手动刷新）；若这里 force 一发，关 pane 时缓存若已过
+  // 120s 就会卡 ~35s，是个坏意外。所以只重画已有名单（带缓存年龄），要看最新集群点标题栏
+  // 那颗刷新钮。
+  kPaintList();
+  // 关终端 = 回总览 Tab（该 session 的 Tab 仍留在条上，没被关掉；关 Tab 走那颗 ×）。
+  activeKey = 'home';
+  renderTabs();
+  // 你刚盯完 was 这个 session，退出来它那一行就该是最新的 —— 单独问它一次（便宜，见 kRefreshOne）。
+  // fire-and-forget：拿不到就保持原样，不卡关 pane 这条路。
+  kRefreshOne(was);
+};
+// 刷新 / 关标签 / 跳走这条是**真走人**:把 window 松回 latest 并清掉借标志（paneGeomRestore）。
+// 「切后台但人还在看」是另一条路,见下面 visibilitychange —— 那条临时让渡、留着 borrowed 回来再借。
+// 两条分开:走人就该清干净,后台只是暂时让位。不松的后果:对面 window 被钉在贴浏览器盒子的
+// 尺寸（window-size manual），别的 client / 别的设备 attach 进来都被钉住跟不了自己（2026-10-13
+// 手机继承桌面宽度那次就是漏了这一松）。c-* 的 id 只有操控区能摸，所以这个监听挂在这儿，不在 shell。
+addEventListener('pagehide', () => {
+  if ($('c-pane-modal').classList.contains('open') && paneGeomBorrowed) {
+    paneGeomRestore({ keepalive: true });
+  }
+});
+/* 浏览器切前后台时的几何让渡，和 pagehide 同一套、同样留在操控区自己手里 —— c-* 的元素和
+   paneGeom* 只有操控区能摸，shell 那边的 visibilitychange 只把「现在是前台还是后台」转进来
+   （跟 kCovered 一个道理：判断留在这边，shell 只拿结果）。
+   切后台（标签切走 / 手机锁屏回桌面）：把 window 松回 latest，但留着 paneGeomBorrowed —— 人还在
+   看这个 pane，回前台再借一次。回前台：再贴合一次盒子。没开 pane 就与几何无关，直接不管。 */
+function kVisibility(hidden) {
+  if (!kCovered()) return;
+  if (hidden) { if (paneGeomBorrowed) paneGeomRelease(); }
+  else paneFitGeom(0);
+}
+/* 这一屏现在被挡着没有。给 shell 区那条轮询用：pane 弹窗是铺满视口的（ROUND10 的选择），
+   开着的时候它后面的名单、派活区、作业表一个像素都看不见，那几拍重排是白画的。
+   这个判断留在操控区自己手里，因为 c-* 的元素只有操控区能摸（「两个半边的 id 不许交叉」
+   那三条结构断言）—— shell 只拿这个函数的返回值。 */
+function kCovered() {
+  return $('c-pane-modal').classList.contains('open');
+}
+/* 弹窗开着的时候把整页钉死（见 html.pane-open 那条 CSS）。
+   两层都要挂：只挂一层的话另一层仍然是滚动容器，往下滑照样能把弹窗下面那片页面底露出来
+   —— owner 看到的那条白边就是它。 */
+function panePageLock(on) {
+  document.documentElement.classList.toggle('pane-open', on);
+  document.body.classList.toggle('pane-open', on);
+}
+/* 关掉弹窗之后，焦点要回到名单上这个 session 自己那一行。
+   不还的话焦点掉回 body：用鼠标的人看不见这件事，只用键盘的人每次关完弹窗都要从头
+   ↑↓ 找位置。
+   为什么是「按身份重新查行」，而不是开 pane 的时候把那个按钮记下来：roster 每 10 秒
+   用 innerHTML 整片重绘一次，记下来的那个 DOM 节点在弹窗开着的这段时间里几乎一定会被
+   换掉 —— 阶段3 的真浏览器实测抓到的就是这个，document.contains() 判否，焦点一次也
+   没还回去过。行的 id 带的是下标，下标会随名单增删而移位，所以用 name+node_ip 重新
+   定位，而不是记下标。行上有 tabindex="-1"：能被代码 focus，但不进 Tab 序列。
+   查不到（这个 session 期间消失了）就什么都不做：焦点留在 body 比跳到一行别人的活上好。*/
+function paneRestoreFocus(s) {
+  if (!s) return;
+  const i = kRows.findIndex(r => r.name === s.name && r.node_ip === s.node_ip);
+  const row = i >= 0 ? $(`c-row-${i}`) : null;
+  if (row && row.focus) row.focus();
+}
+/* 窗口尺寸变了就重新贴合对面。防抖在 paneFitGeom 里（250ms）—— 拖窗口会连着发几十个
+   resize 事件，而每一发贴合是一次真的写，所以这里的防抖不是省 CPU，是省写。
+   只在弹窗开着的时候做：关着的时候宿主盒子高度是 0，量出来是「1 行」，会去要一个 20×5。 */
+addEventListener('resize', () => {
+  if ($('c-pane-modal').classList.contains('open')) paneFitGeom();
+});
+
+/* ── 移动端额外按键条（Termux 式 extra-keys）────────────────────────────
+   软键盘打不出来的键（Esc / Tab / ⇧Tab / 方向 / Ctrl）：每颗把一段终端字节序列喂进和
+   打字同一扇门（paneInput → POST /api/kore/input，Bearer+confirm 一个字没松）。
+   Ctrl 是黏一次修饰键（改写见 paneInput 顶上）。参考 Termux 的 extra-keys row 设计。 */
+const KBAR_SEQ = {
+  esc: '\x1b', tab: '\t', stab: '\x1b[Z', 'c-c': '\x03',
+  left: '\x1b[D', down: '\x1b[B', up: '\x1b[A', right: '\x1b[C',
+};
+let paneCtrl = false;      // 黏一次 Ctrl 是否点亮（见 paneInput / paneSetKbd）
+function paneSetCtrl(on) {
+  paneCtrl = !!on;
+  const b = document.querySelector('#kbar .kb-mod');
+  if (b) b.setAttribute('aria-pressed', paneCtrl ? 'true' : 'false');
+}
+// pointerdown 上 preventDefault：点按键条不抢走终端焦点，否则软键盘收起、还得再点终端。
+$('kbar').addEventListener('pointerdown', ev => { if (ev.target.closest('button.kb')) ev.preventDefault(); });
+$('kbar').addEventListener('click', ev => {
+  const b = ev.target.closest('button.kb'); if (!b) return;
+  const k = b.dataset.k;
+  if (k === 'ctrl') { paneSetCtrl(!paneCtrl); return; }   // 黏一次：改写下一个键
+  const seq = KBAR_SEQ[k]; if (!seq) return;
+  paneInput(seq);
+  const ci = $('compose-in');
+  // 方向/Esc/Tab 之后把焦点还给撰写框（手机）或终端，别让软键盘收起。
+  if (ci && window.matchMedia('(max-width:860px)').matches) ci.focus();
+  else if (paneTerm) paneTerm.focus();
+});
+
+/* ── 移动端原生撰写框 ──────────────────────────────────────────────
+   在真正的 <textarea> 里撰写：输入法、语音听写、流式「边说边改」全由浏览器原生处理，
+   本地即时回显、零往返延迟。回车（非合成态、非 Shift）或发送钮 → 把整句经 paneInput
+   送进对面并清空；空内容回车 = 单独一个回车（给菜单确认用）。 */
+function composeGrow() {
+  const ci = $('compose-in'); if (!ci) return;
+  ci.style.height = 'auto';
+  ci.style.height = Math.min(104, ci.scrollHeight) + 'px';
+}
+function composeSend() {
+  const ci = $('compose-in'); if (!ci) return;
+  paneInput(ci.value + '\r');     // 空串也发 = 裸回车
+  ci.value = ''; composeGrow(); ci.focus();
+}
+$('compose-in').addEventListener('input', composeGrow);
+$('compose-in').addEventListener('keydown', ev => {
+  // 合成中（输入法/语音正在改写）的回车是「上屏确认」，不发送；只有非合成态回车才发送。
+  if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); composeSend(); }
+});
+$('compose-send').addEventListener('click', ev => { ev.preventDefault(); composeSend(); });
+
+/* 软键盘让位：手机软键盘弹出时 visualViewport 变矮。把终端弹窗底边抬到键盘顶上 ——
+   末尾那条 in-flow 的 #kbar 就正好浮在键盘上方（和 Termux 的 extra-keys 一样在键盘上面），
+   终端 flex:1 收缩、随后重新贴合对面几何。桌面没有软键盘，偏移恒为 0，无副作用。 */
+function paneVVSync() {
+  const vv = window.visualViewport, m = $('c-pane-modal');
+  if (!vv || !m) return;
+  const kb = Math.round(window.innerHeight - vv.height - vv.offsetTop);
+  const up = kb > 40;                           // >40 才当作键盘，避开浏览器 UI 栏的小抖动
+  m.style.bottom = (up ? kb : 0) + 'px';
+  // 键盘弹出时按键条贴在键盘顶上：home-indicator 安全区被键盘盖住、无意义，底部那段
+  // max(12px,safe-area) 留白要收掉，只留一丢丢（见 #c-pane-modal.kbd-up #kbar）。
+  m.classList.toggle('kbd-up', up);
+  if (m.classList.contains('open')) paneFitGeom();
+}
+if (window.visualViewport) {
+  visualViewport.addEventListener('resize', paneVVSync);
+  visualViewport.addEventListener('scroll', paneVVSync);
+}
+
+$('c-pane-refresh').onclick = refreshPane;
+/* 字号没有按钮。owner 两次都是同一句话：「怎么还有个调字体大小的按钮」「做的跟 jupyter
+   那样很难么」—— JupyterLab 的终端面板上也没有这种旋钮，字号是全局设置里的一个数，终端
+   本身只管「盒子多大就铺多大」。所以这里字号是一个固定的 13，唯一的改法是 Ctrl+滚轮：
+   一个不占界面的手势（VS Code 的终端、各家 term 都是它），档位记在 localStorage。
+   passive:false + preventDefault 是必须的：不拦的话浏览器会把整页缩放掉（那会把弹窗、
+   名单、所有东西一起放大，而人想放大的只有终端里的字）。不带 Ctrl 的滚轮一个字不碰 ——
+   那是 xterm 自己的回看历史。
+   2026-10-12：攒够一格才动一档。原来是「来一发 wheel 就 ±1」，而触摸板和带平滑滚动的
+   鼠标一次手势会吐几十发 deltaY 只有 1~4 的小事件 —— 实际效果是字号从 13 一路飙到上下
+   限，而且每一档都要重排整个终端 + 重新量盒子 + 给对面发一次 resize。所以把 deltaY 累起
+   来，过了 60（Chrome 一个鼠标滚轮刻度是 100，触摸板一小段约 10~40）才走一档，走完扣掉。
+   deltaMode 不是像素的要先换算成像素，不然 Firefox 的「3 行」会被当成 3 像素，永远攒不够。
+   累加器是模块级的一个数、就地加减：render-test 有一条正则盯着这个处理器的形状
+   （`if (!ev.ctrlKey) return;` 和 `ev.preventDefault();` 必须相邻、结尾必须是
+   `{ passive: false });`），抽成函数会把那条断言变成空断言。 */
+$('c-pane-term').addEventListener('wheel', ev => {
+  if (!ev.ctrlKey) return;
+  ev.preventDefault();
+  const px = ev.deltaMode === 1 ? ev.deltaY * 16 : ev.deltaMode === 2 ? ev.deltaY * 400 : ev.deltaY;
+  paneWheelAcc = (paneWheelAcc > 0) === (px > 0) ? paneWheelAcc + px : px;
+  if (Math.abs(paneWheelAcc) < 60) return;
+  paneWheelAcc = 0;
+  paneSetFont(paneFontGet() + (px < 0 ? 1 : -1));
+}, { passive: false });
+$('c-pane-modal').addEventListener('click', ev => {
+  if (ev.target === $('c-pane-modal')) $('c-pane-close').click();
+});
+/* 全局 Esc 关弹窗 —— 但键盘直通开着的时候不关。Esc 是对面最要紧的那个键
+   （claude-code 的「esc to interrupt」就是它），闸开着还被这块板子截下来当「关窗」，
+   等于把唯一一个能打断对面的键吞掉。闸开着时关窗只剩「关闭」那颗按钮 —— ROUND10 把 pane
+   铺满了视口，「点弹窗外面那片灰」那条路没有了（那条监听留着，见 #c-pane-modal 的 CSS）。
+   挂在 capture 相（第三个参数 true）是被真浏览器逼出来的，不是风格偏好：焦点在
+   xterm 自己的 textarea 上时，xterm 的 _keyDown 对 Escape 走 cancel(e,true) ——
+   那里面是 preventDefault() **加** stopPropagation()，冒泡相的 document 监听根本
+   收不到。于是「闸关着按 Esc 关弹窗」在真浏览器里是哑的（阶段2 实测抓到的）。
+   capture 相在 textarea 之前跑，所以这条判断自己说得准；这里不 preventDefault，
+   闸关着时那一下继续往下走给 xterm 也无所谓 —— disableStdin 挡着，发不出去。 */
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape' && $('c-pane-modal').classList.contains('open') && !paneKbd) {
+    $('c-pane-close').click();
+  }
+}, true);
+/* 键盘导航的桥：#c-list 上已经挂了同一个 kKeyNav（焦点在列表里时走那条），这一条管
+   「焦点还在 body 上」的常见情形 —— 刚切到操控 Tab，还没点过任何东西就想按↓。
+   弹窗开着的时候整条桥让位：那时候该响应的是弹窗（上面那条 Esc、以及输入框自己的
+   回车），列表在背后跟着动只会让人不知道自己在操作谁。逻辑一个字都不在这里，全在
+   kKeyNav 里 —— 这条桥不可测（stub 的 document 只记不发），所以它必须没有逻辑。 */
+document.addEventListener('keydown', ev => {
+  if ($('c-pane-modal').classList.contains('open')) return;
+  kKeyNav(ev);
+});
+
+/* kore polling is separate from /api/state: the roster has its own server-side TTL
+   (120s cluster) and a cluster sweep costs ~35s per dead node, so it must never
+   ride along on the 5s state poll. 2026-10-12 owner 又定：连 kore 侧的 10s 轮询都不
+   自动重扫 roster 了，roster 读缓存，重扫走手动刷新钮。
+   roster 请求不带任何 rsi run 参数 —— kore 域和 rsi 域互不知道对方的选中态。
+   2026-10-19 域轴重构：RSI 对话轮询（原 kLoopRuns）已随写模块迁去 rsi 域（那边一发合并
+   tick 读 runs+trace+base）；这里只剩 roster（kTick，固定 scan=cluster、读 120s 缓存，
+   只有刷新钮带 force 真重扫）+ 名单行年龄刷新（kAgeTick）。冷缓存首帧仍要付一次 ~35s，
+   那是 startup 的 kTick() 这一发。 */
+let kBusy = false;
+async function kTick(force) {
+  if (kBusy) return;
+  kBusy = true;
+  try {
+    const r = await apiGet(`/api/kore/roster?scan=cluster${force ? '&force=1' : ''}`)
+      .catch(e => ({ ok: false, error: e.message, sessions: [] }));
+    renderK(r);
+  } finally { kBusy = false; }
+}
+</script>
+
+<script data-zone="shell">
+'use strict';
+/* 单屏（kore session）：没有 Tab 切换 —— rsi 域已拆出本包，这屏只剩 kore 名单 + 终端。
+   一条可见态轮询（kore 10s）：只在本屏真被看、且没被终端弹窗挡住时刷名单行年龄。切走/切回
+   的脏标记保留下来，露面立刻补一拍，所以「看到的不比它露面那刻旧」照旧成立。 */
+const pollStale = { kore: false };
+function pollLive(which, covered) {
+  const live = !document.hidden && !covered;
+  if (!live) pollStale[which] = true;
+  return live;
+}
+function pollWake(which) {
+  if (!pollStale[which] || document.hidden) return;
+  pollStale[which] = false;
+  // 露面补一拍，但不重扫集群（roster 读缓存+手动刷新，别在切回来那刻冷缓存卡 ~35s）。
+  kPaintList(); kAgeTick();
+}
+kTick();
+// kore 侧 10s 只刷名单行年龄（kAgeTick），**不自动重扫 roster**（全集群结果缓存住，读
+// 缓存+手动刷新钮）。roster 只在加载/手动刷新/写后刷新三处真拉。
+setInterval(() => { if (pollLive('kore', kCovered())) { kAgeTick(); } }, 10000);
+document.addEventListener('visibilitychange', () => {
+  // 几何让渡交给 kore 区的 kVisibility（c-* 元素和 paneGeom* 只那边能摸）。
+  kVisibility(document.hidden);
+  if (document.hidden) return;
+  pollWake('kore');  // 回到前台把落下的补上（后台 Tab 被浏览器把 setInterval 掐到 ~1min）。
+});
+</script>
+</body>
+</html>

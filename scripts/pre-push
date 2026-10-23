@@ -1,0 +1,35 @@
+#!/bin/bash
+# kore pre-push hook — GitHub sees only `main` and tags.
+#
+# Day-to-day work happens on a local `dev` branch that GitHub never sees. A release is a
+# fast-forward (or squash) of `dev` into `main`, then `git push origin main`. This hook
+# rejects pushing any ref except `main` and tags, so a local branch (dev, wip/*, a detached
+# experiment) can never leak to the public remote by accident.
+#
+# Install (also done once at re-init):
+#     cp scripts/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+#
+# git feeds one line per ref being pushed on stdin:
+#     <local_ref> <local_sha> <remote_ref> <remote_sha>
+# A delete has local_sha = all-zeros; we allow deletes (they remove, never leak).
+
+set -u
+ZERO="0000000000000000000000000000000000000000"
+status=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -z "${remote_ref:-}" ] && continue
+  # Allow deleting a remote ref (local_sha is all zeros on a delete).
+  [ "$local_sha" = "$ZERO" ] && continue
+  case "$remote_ref" in
+    refs/heads/main) : ;;          # the one public branch
+    refs/tags/*)     : ;;          # release tags
+    *)
+      echo "pre-push: refused to push '$remote_ref' — GitHub only sees 'main' and tags." >&2
+      echo "          Merge your work into main first:  git checkout main && git merge dev" >&2
+      status=1
+      ;;
+  esac
+done
+
+exit $status

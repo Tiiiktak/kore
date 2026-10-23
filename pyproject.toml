@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kore"
+dynamic = ["version"]   # single source of truth: src/kore/__init__.py __version__
+description = "Manage kore sessions (Claude Code in tmux across machines) from a web dashboard or as MCP tools — explicit server/client, stdlib only."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = ["tmux", "claude", "mcp", "cluster", "terminal", "ssh"]
+authors = [{ name = "kore contributors" }]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = []   # stdlib only — no third-party runtime dependencies
+
+[project.scripts]
+kore = "kore.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Tiiiktak/kore"
+Repository = "https://github.com/Tiiiktak/kore"
+
+[tool.hatch.version]
+path = "src/kore/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kore"]
+# Force non-.py and extension-less data into the wheel so it is self-contained:
+# the dashboard HTML, the pinned xterm vendor tree, the write policy, and the
+# hyphenated / extension-less entry scripts (loaded by path, not imported).
+artifacts = [
+    "**/*.html",
+    "**/*.css",
+    "**/*.js",
+    "**/*.json",
+    "**/*.txt",
+    "**/*.md",
+    "**/*.sh",
+    "**/kore-agent.py",
+    "**/kore-bridge.py",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/kore",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "kore",
+]

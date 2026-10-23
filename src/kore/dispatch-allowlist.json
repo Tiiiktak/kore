@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "kore write policy — read by koreops.py, which is the only door the web server",
+    "may use for start/stop/send/keys/input/resize. This FILE decides what is allowed;",
+    "the code does not. Editing it is a config change, not a code change: no restart.",
+    "(The file keeps its historical name `dispatch-allowlist.json`; koreops.py reads the",
+    "`kore` object below. Point koreops elsewhere with $RSI_DISPATCH_ALLOWLIST if you move it.)"
+  ],
+  "kore": {
+    "_comment": [
+      "nodes ['*'] means 'any node the engine can route to': the server's own host, plus",
+      "any client with a fresh entry in the agent registry (agents.json). The structural",
+      "bound there is the AGENT TOKEN a reachable client agent must honor — a shared secret,",
+      "so leaks matter. Restrict to specific IPs by listing them instead of '*'.",
+      "deny_nodes: IPs that may never be driven from here even if they are live/registered.",
+      "protected_sessions is a safety interlock, not a permission: any name listed here is",
+      "refused for ALL write verbs (start/stop/send/keys/input/resize) while reads keep",
+      "working. The mechanism lives in koreops.py `_validate()`; this list only decides WHO",
+      "it applies to. Empty by default — add a session name to make it read-only.",
+      "cwd_roots: a new session's working directory must sit under one of these prefixes.",
+      "allowed_keys: the named keys `kore_keys` may send (free-text goes through send/input)."
+    ],
+    "enabled": true,
+    "nodes": ["*"],
+    "deny_nodes": [],
+    "verbs": {"start": true, "stop": true, "send": true, "keys": true},
+    "protected_sessions": [],
+    "allowed_keys": ["Enter", "Escape", "Up", "Down", "Tab", "BSpace", "C-c"],
+    "cwd_roots": ["/data", "/root", "/tmp", "/home"],
+    "max_message_bytes": 16384,
+    "max_per_minute": 20,
+    "read_cache_s": 0.5,
+    "roster_ttl_s": 20.0,
+    "cluster_ttl_s": 120.0,
+    "send_timeout_s": 300,
+    "job_keep": 200
+  }
+}
