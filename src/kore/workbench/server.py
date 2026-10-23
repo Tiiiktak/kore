@@ -90,10 +90,25 @@ KORE_OPS_PATH = os.environ.get("KORE_OPS_PATH", os.path.join(os.path.dirname(HER
 MAX_BODY = 128 * 1024
 
 # Installed version, surfaced to the dashboard via /api/state so the titlebar can show it.
-try:
-    from kore import __version__ as KORE_VERSION
-except Exception:        # running from an odd layout; a missing version is non-critical
-    KORE_VERSION = "?"
+# Read from the package's __init__.py BY PATH: this file runs as a script, so the `kore`
+# package is importable only when it happens to be installed into site-packages (uv tool),
+# not from a clone or an install.sh install.
+def _read_version() -> str:
+    try:
+        with open(os.path.join(os.path.dirname(HERE), "__init__.py"), encoding="utf-8") as f:
+            m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', f.read(), re.M)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    try:
+        from kore import __version__
+        return __version__
+    except Exception:    # a missing version is non-critical
+        return "?"
+
+
+KORE_VERSION = _read_version()
 
 # The client-agent registry, and the token that fences the register-push door. This is a
 # SEPARATE trust domain from the WB token above: KORE_AGENT_TOKEN is the server<->client

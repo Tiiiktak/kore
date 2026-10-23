@@ -111,8 +111,33 @@ def test_routing():
     print("ok  routing: self -> local (incl. 124 timeout), non-self -> http refuses cleanly")
 
 
+def test_dashboard_version():
+    """The dashboard runs server.py as a SCRIPT, where the `kore` package is usually not
+    importable; the titlebar once showed `v?` because of that. Run server.py's own version
+    reader (extracted by AST, so the server is not started) and compare with __init__.py."""
+    import ast
+    import re
+    import sys
+    src = open(os.path.join(HERE, "workbench", "server.py"), encoding="utf-8").read()
+    fn = next(n for n in ast.parse(src).body
+              if isinstance(n, ast.FunctionDef) and n.name == "_read_version")
+    ns = {"os": os, "re": re, "HERE": os.path.join(HERE, "workbench")}
+    saved = sys.path[:]
+    sys.path[:] = [p for p in sys.path if not os.path.isdir(os.path.join(p, "kore"))]
+    try:
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), "server.py", "exec"), ns)
+        got = ns["_read_version"]()
+    finally:
+        sys.path[:] = saved
+    want = re.search(r'__version__\s*=\s*"([^"]+)"',
+                     open(os.path.join(HERE, "__init__.py"), encoding="utf-8").read()).group(1)
+    assert got == want, f"dashboard version {got!r} != package version {want!r}"
+    print(f"ok  dashboard reads its version without importing the package ({got})")
+
+
 if __name__ == "__main__":
     test_child_env_propagates()
     test_registry_readers()
     test_routing()
+    test_dashboard_version()
     print("\nall routing tests passed")
