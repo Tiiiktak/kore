@@ -103,12 +103,57 @@ except Exception:        # running from an odd layout; a missing version is non-
 # agent and no registry entry — the engine routes it locally. See kore-agent.py /
 # kore-bridge.py for the readers.
 KORE_AGENT_TOKEN = os.environ.get("KORE_AGENT_TOKEN", "")
+# The one-line installer, shown in the dashboard's "add a machine" panel (same default and
+# override as `kore` itself, see cli.INSTALL_URL).
+INSTALL_URL = os.environ.get(
+    "KORE_INSTALL_URL",
+    f"https://raw.githubusercontent.com/{os.environ.get('KORE_REPO', 'Tiiiktak/kore')}/main/install.sh")
 KORE_AGENTS_FILE = os.path.expanduser(
     os.environ.get("KORE_AGENTS_FILE", "~/.kore/agents.json"))
 _IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
-def _agents_register(node_ip: str, agent_url: str, sessions: list) -> dict:
+# Server -> client reachability, probed when a client registers. Registration only proves
+# client -> server; the engine also needs server -> client (POST /exec, GET /tap on the
+# agent port), and that direction is the one a firewall usually blocks. Only SUCCESS is
+# cached (per node + agent instance), so a heartbeat every ~15s is not a probe every ~15s,
+# while a failure is re-checked on every beat and clears as soon as the path is fixed.
+_REACH_TTL_S = 60.0
+_reach_cache: dict = {}            # node_ip -> (agent_key, checked_at)
+_reach_mu = threading.Lock()
+
+
+def _probe_agent(node_ip: str, agent_url: str, instance: str = "") -> tuple:
+    """(reachable, error) for a client agent. A success is cached for _REACH_TTL_S per
+    (node, url, agent instance); a failure is never cached."""
+    import urllib.request  # noqa: PLC0415
+    now = time.time()
+    key = f"{agent_url}|{instance}"
+    with _reach_mu:
+        hit = _reach_cache.get(node_ip)
+        if hit and hit[0] == key and now - hit[1] < _REACH_TTL_S:
+            return True, ""
+    ok, err = False, ""
+    try:
+        req = urllib.request.Request(agent_url.rstrip("/") + "/ping",
+                                     headers={"Authorization": "Bearer " + KORE_AGENT_TOKEN})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=3) as r:
+            ok = r.status == 200
+            if not ok:
+                err = f"HTTP {r.status}"
+    except Exception as exc:  # noqa: BLE001 - reported to the client verbatim
+        err = f"{type(exc).__name__}: {exc}"
+    with _reach_mu:
+        if ok:
+            _reach_cache[node_ip] = (key, now)
+        else:
+            _reach_cache.pop(node_ip, None)
+    return ok, err
+
+
+def _agents_register(node_ip: str, agent_url: str, sessions: list,
+                     extra: dict | None = None) -> dict:
     """Merge ONE client's record into KORE_AGENTS_FILE under flock + atomic replace.
 
     The exclusive lock serializes concurrent registers from different clients, and we
@@ -120,7 +165,7 @@ def _agents_register(node_ip: str, agent_url: str, sessions: list) -> dict:
     """
     os.makedirs(os.path.dirname(KORE_AGENTS_FILE) or ".", exist_ok=True)
     rec = {"agent_url": agent_url, "last_seen": time.time(),
-           "sessions": [s for s in sessions if isinstance(s, str)]}
+           "sessions": [s for s in sessions if isinstance(s, str)], **(extra or {})}
     with open(KORE_AGENTS_FILE + ".lock", "w") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
@@ -600,6 +645,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             eng = state_mod.bridge()
             prune = getattr(eng, "agents_prune", None)
             self._json(200, {"ok": True, "agents": prune() if prune else {}})
+        elif path == "/api/join":
+            # Everything the "add a machine" panel needs: the install one-liner, the exact
+            # `kore client` line, and how each joined client is doing. Guarded by the WB
+            # token like every other read. It reveals the agent token, which is no
+            # escalation for a WB-token holder: that token already drives every pane.
+            eng = state_mod.bridge()
+            ip = eng._local_node_ip()
+            server = f"{ip}:{PORT}"
+            ttl = float(getattr(eng, "KORE_AGENT_TTL", 45))
+            now = time.time()
+            clients = []
+            for nip, rec in sorted((eng.agents_load() or {}).items()):
+                if not isinstance(rec, dict):
+                    continue
+                age = now - float(rec.get("last_seen", 0) or 0)
+                clients.append({"node_ip": nip, "hostname": rec.get("hostname", ""),
+                                "agent_url": rec.get("agent_url", ""),
+                                "last_seen_s": round(age), "online": age <= ttl,
+                                "reachable": rec.get("reachable"),
+                                "reach_error": rec.get("reach_error", ""),
+                                "sessions": len(rec.get("sessions") or [])})
+            cmd = (f"kore client --server {server} --token {KORE_AGENT_TOKEN}"
+                   if KORE_AGENT_TOKEN else "")
+            self._json(200, {"ok": True, "server": server, "self_node": ip,
+                             "install": f"curl -fsSL {INSTALL_URL} | sh",
+                             "command": cmd, "enabled": bool(KORE_AGENT_TOKEN),
+                             "agent_port": 8199, "ttl_s": int(ttl), "clients": clients})
         elif path == "/api/kore/jobs":
             self._json(200, {"ok": True, "jobs": koreops.jobs(_qint(one("limit"), 30, 1, 500))})
         elif path == "/api/kore/job":
@@ -1164,7 +1236,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._fault()
 
     def _agents_register_endpoint(self, raw: bytes) -> None:
-        """Agent → bridge registry push (the FS-not-shared fallback).
+        """Client agent → server registry push: the one door a client joins through.
 
         Authenticated by KORE_AGENT_TOKEN as a Bearer header — a trust domain distinct from
         the WB token, so a browser token can never register an agent and an agent token
@@ -1198,9 +1270,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(400, {"ok": False,
                              "error": "need node_ip (dotted quad) + http(s) agent_url"})
             return
+        reachable, reach_error = _probe_agent(node_ip, agent_url,
+                                              f"{body.get('pid')}:{body.get('started_at')}")
         rec = _agents_register(node_ip, agent_url,
-                               sessions if isinstance(sessions, list) else [])
-        self._json(200, {"ok": True, "node_ip": node_ip, "record": rec})
+                               sessions if isinstance(sessions, list) else [],
+                               {"reachable": reachable, "reach_error": reach_error,
+                                "hostname": str(body.get("hostname") or "")[:64]})
+        self._json(200, {"ok": True, "node_ip": node_ip, "record": rec,
+                         "reachable": reachable, "reach_error": reach_error})
 
     def _fault(self) -> None:
         """500 的出口：traceback 进 stderr（日志里要看得到），回给调用方的只有一个短编号。

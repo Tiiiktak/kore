@@ -73,9 +73,18 @@ _ORIG_PROXY = {v: os.environ[v] for v in _PROXY_VARS if v in os.environ}
 STATE_HOME = os.path.expanduser(
     os.environ.get("KORE_STATE_HOME") or "~/.kore")
 # Where `kore server` records the background dashboard so `down`/`status` can find it.
-PIDFILE = os.path.join(STATE_HOME, "kore.pid")
-RUNFILE = os.path.join(STATE_HOME, "kore.run")   # live board config, "k=v" lines
-LOGFILE = os.path.join(STATE_HOME, "kore.log")
+# Per-host file names: ~/.kore often lives on shared storage (an NFS/GPFS home seen by
+# every machine), so a pid recorded on one host must never be signalled from another.
+HOST = (socket.gethostname() or "host").split(".")[0]
+PIDFILE = os.path.join(STATE_HOME, f"server-{HOST}.pid")
+RUNFILE = os.path.join(STATE_HOME, f"server-{HOST}.run")   # live board config, "k=v"
+LOGFILE = os.path.join(STATE_HOME, f"server-{HOST}.log")
+LEGACY_PIDFILE = os.path.join(STATE_HOME, "kore.pid")      # written by kore <= 0.3.5
+# `kore client` runs the agent in the background too.
+CLIENT_PIDFILE = os.path.join(STATE_HOME, f"client-{HOST}.pid")
+CLIENT_RUNFILE = os.path.join(STATE_HOME, f"client-{HOST}.run")
+CLIENT_LOGFILE = os.path.join(STATE_HOME, f"client-{HOST}.log")
+CLIENT_STATUS = os.path.join(STATE_HOME, f"client-{HOST}.status")   # written by the agent
 # The agent (client-join) token: minted on first `kore server`, 0600, like the WB token.
 AGENT_TOKEN_FILE = os.path.join(STATE_HOME, "agent.token")
 
@@ -163,21 +172,51 @@ def _load_agent_token() -> str:
 
 # ----------------------------------------------------------------- server / client
 
-def _read_pid() -> int:
-    """The pid `kore server` recorded, or 0 if there is no live background board."""
+def _pid_alive(pid: int, marker: str) -> bool:
+    """Is `pid` a live process on THIS host running `marker` (a script path fragment)?
+    Checking the command line guards against pid reuse and against a pidfile written on
+    another host that shares this home directory."""
     try:
-        with open(PIDFILE, encoding="utf-8") as f:
-            pid = int(f.read().strip())
-    except (OSError, ValueError):
-        return 0
-    try:
-        os.kill(pid, 0)           # signal 0 = "does this process exist / is it ours"
+        os.kill(pid, 0)           # signal 0 = "does this process exist"
     except ProcessLookupError:
-        return 0                  # stale pidfile; the process is gone
+        return False
     except PermissionError:
-        return pid                # exists but owned by someone else — still "running"
-    return pid
+        pass                      # exists but owned by someone else
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return marker.encode() in f.read()
+    except OSError:
+        return True               # no /proc (macOS): trust the signal-0 answer
 
+
+def _pidfile_read(path: str, marker: str) -> int:
+    """The pid recorded in `path` ("<pid> <host>"), or 0 if it is not a live `marker`
+    process on this host."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            parts = f.read().split()
+        pid = int(parts[0])
+    except (OSError, ValueError, IndexError):
+        return 0
+    if len(parts) > 1 and parts[1] != HOST:
+        return 0                  # recorded on another machine sharing this home
+    return pid if _pid_alive(pid, marker) else 0
+
+
+def _pidfile_write(path: str, pid: int) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"{pid} {HOST}\n")
+
+
+def _read_pid() -> int:
+    """The pid of the background board on THIS host, or 0."""
+    return (_pidfile_read(PIDFILE, "workbench/server.py")
+            or _pidfile_read(LEGACY_PIDFILE, "workbench/server.py"))
+
+
+def _read_client_pid() -> int:
+    """The pid of the background client agent on THIS host, or 0."""
+    return _pidfile_read(CLIENT_PIDFILE, "kore-agent.py")
 
 def _health_ok(host: str, port: str, timeout: float = 1.0) -> bool:
     """Is the board answering /api/health? (the one endpoint that needs no token)."""
@@ -290,7 +329,8 @@ def _server(rest: list) -> int:
         if restart:
             sys.stdout.write("kore is running; --restart requested, bringing it down "
                              "first...\n")
-            _down([])
+            _stop_pid(pid)                 # the board only — a client here keeps running
+            _rm(PIDFILE, RUNFILE, LEGACY_PIDFILE)
         else:
             prev = _runfile_read()
             desired = {"host": host, "port": port, "prefix": prefix}
@@ -322,8 +362,7 @@ def _server(rest: list) -> int:
         [sys.executable, os.path.join(PKG, SERVER_PY)],
         stdin=subprocess.DEVNULL, stdout=log, stderr=log,
         start_new_session=True, env=os.environ.copy())
-    with open(PIDFILE, "w", encoding="utf-8") as f:
-        f.write(str(proc.pid) + "\n")
+    _pidfile_write(PIDFILE, proc.pid)
     _runfile_write(host, port, prefix)
 
     # Wait for the board to answer, so the link we print actually opens.
@@ -347,20 +386,25 @@ def _server(rest: list) -> int:
 
 
 def _client(rest: list) -> int:
-    """Join THIS machine to a server as a worker node.
+    """Join THIS machine to a server as a worker node, in the background.
 
     Requires the server's address and the agent token it printed — there is NO default
-    for either. Sets KORE_BRIDGE_URL + KORE_AGENT_TOKEN and runs the per-node agent, which
-    POSTs its record to the server every heartbeat so the node appears in the roster.
+    for either. Checks the server is reachable, starts the agent detached, and waits for
+    the first registration to come back before returning, so a wrong token or a blocked
+    port is reported here instead of discovered later as "the node never showed up".
+    `--foreground` runs the agent attached to this terminal (for systemd / debugging).
     """
     ap = argparse.ArgumentParser(
         prog="kore client",
         description="Join this machine to a kore server as a worker node (paste the join "
-                    "command the server printed).")
+                    "command the server printed). Runs in the background; stop with "
+                    "`kore down`.")
     ap.add_argument("--server", required=True, metavar="IP:PORT",
                     help="the server's dashboard address, e.g. 10.0.0.7:8198 (no default)")
     ap.add_argument("--token", required=True, metavar="TOK",
                     help="the agent token from the server's join command (no default)")
+    ap.add_argument("--foreground", action="store_true",
+                    help="run the agent in this terminal instead of the background")
     # argparse exits 2 with a usage error if --server/--token are missing — "no default".
     args, passthrough = ap.parse_known_args(rest)
 
@@ -371,15 +415,147 @@ def _client(rest: list) -> int:
     if not server or ":" not in server:
         sys.stderr.write("kore client: --server must be <ip:port> (e.g. 10.0.0.7:8198)\n")
         return 2
+    url = f"http://{server}"
+    shost = server.rsplit(":", 1)[0]
+    if not _env("NODE_IP") and shost in (_detect_node_ip(), "127.0.0.1", "localhost"):
+        sys.stdout.write(
+            f"This machine is the server ({server}) — it is already a worker node, so "
+            f"there is nothing to join. Run `kore client …` on the OTHER machine.\n")
+        return 0
 
-    _set_env("BRIDGE_URL", f"http://{server}")
+    # 1) client -> server: can we reach the dashboard at all?
+    if not _health_url_ok(url):
+        sys.stderr.write(
+            f"\n✗ cannot reach the kore server at {url} from this machine.\n"
+            f"    • is that the server's address as seen from THIS machine?\n"
+            f"    • is the server up (`kore status` on the server)?\n"
+            f"    • is port {server.rsplit(':', 1)[1]} open from this machine to the server?\n\n")
+        return 1
+
+    # 2) is the token right? Checked before touching a client that may already be running
+    # here, so a typo never takes a working client down.
+    tok_ok = _token_accepted(url, args.token)
+    if tok_ok is False:
+        sys.stderr.write(
+            f"\n✗ the server at {url} rejected this token.\n"
+            f"    Copy the exact join line the server shows (dashboard → 添加机器, or run\n"
+            f"    `kore` on the server) — the token is the long value after --token.\n\n")
+        return 1
+
+    _set_env("BRIDGE_URL", url)
     _set_env("AGENT_TOKEN", args.token)
-    sys.stderr.write(
-        f"[kore] joining server http://{server} as a worker node "
-        f"(agent bind {_env('AGENT_BIND', '0.0.0.0')}; node-ip "
-        f"{_env('NODE_IP') or 'autodetect'})\n")
-    return _run(AGENT_PY, passthrough)
+    if args.foreground:
+        sys.stderr.write(f"[kore] joining server {url} as a worker node (foreground)\n")
+        return _run(AGENT_PY, passthrough)
 
+    if _read_client_pid():
+        sys.stdout.write("a kore client is already running on this machine — restarting it "
+                         "with the new settings...\n")
+        _stop_client()
+
+    os.makedirs(STATE_HOME, exist_ok=True)
+    try:
+        os.remove(CLIENT_STATUS)
+    except OSError:
+        pass
+    log = open(CLIENT_LOGFILE, "a", encoding="utf-8")
+    log.write(f"\n===== kore client {time.strftime('%Y-%m-%d %H:%M:%S')} -> {url} =====\n")
+    log.flush()
+    proc = subprocess.Popen(
+        [sys.executable, os.path.join(PKG, AGENT_PY), *passthrough],
+        stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+        start_new_session=True, env=os.environ.copy())
+    _pidfile_write(CLIENT_PIDFILE, proc.pid)
+    with open(CLIENT_RUNFILE, "w", encoding="utf-8") as f:
+        f.write(f"server={server}\n")
+
+    # 3) wait for the agent's first registration (it records the outcome in CLIENT_STATUS)
+    st: dict = {}
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        cur = _client_status()
+        if cur.get("pid") == proc.pid:
+            st = cur
+            break
+        if proc.poll() is not None:
+            break
+        time.sleep(0.25)
+
+    def _fail(msg: str) -> int:
+        _stop_client(quiet=True)
+        sys.stderr.write(msg)
+        return 1
+
+    if not st:
+        if proc.poll() is not None:
+            sys.stderr.write(f"\n✗ the client agent exited (code {proc.returncode}). "
+                             f"Last log lines:\n")
+            _tail(CLIENT_LOGFILE, 12)
+            _stop_client(quiet=True)
+            return 1
+        return _fail(f"\n✗ no answer from the server within 20s; see {CLIENT_LOGFILE}\n")
+    if st.get("rejected"):
+        return _fail(f"\n✗ {st.get('error')}.\n"
+                     f"    Copy the exact `kore client …` line the server shows "
+                     f"(dashboard → 添加机器, or `kore` on the server).\n\n")
+    if not st.get("ok"):
+        return _fail(f"\n✗ registration failed: {st.get('error')}\n    log: {CLIENT_LOGFILE}\n\n")
+
+    node = st.get("node_ip", "?")
+    agent_url = st.get("agent_url", "")
+    sys.stdout.write(f"\n✓ joined {url} as worker node {node}  (agent {agent_url}, pid "
+                     f"{proc.pid})\n")
+    if st.get("reachable") is False:
+        port = agent_url.rsplit(":", 1)[-1] if agent_url else "?"
+        sys.stdout.write(
+            f"\n⚠  but the server cannot reach this machine's agent at {agent_url}:\n"
+            f"       {st.get('reach_error')}\n"
+            f"   The node shows up, yet its sessions cannot be driven until this is fixed:\n"
+            f"     • open TCP port {port} on this machine to the server ({shost}), or\n"
+            f"     • if {node} is not the address the server should use, rejoin with\n"
+            f"       KORE_NODE_IP=<reachable-ip> kore client --server {server} --token …\n")
+    sys.stdout.write(f"\n  logs:  {CLIENT_LOGFILE}\n  stop:  kore down\n\n")
+    return 0
+
+
+def _client_status() -> dict:
+    try:
+        with open(CLIENT_STATUS, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _token_accepted(url: str, token: str):
+    """True / False / None (unknown). The register door checks the Bearer token BEFORE it
+    looks at the body, so an empty POST answers 401 for a wrong token and 400 for a right
+    one — a token check that registers nothing."""
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+    req = urllib.request.Request(url.rstrip("/") + "/api/agents/register", data=b"{}",
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": "Bearer " + token},
+                                 method="POST")
+    try:
+        urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=8)
+        return True
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return False
+        return True if e.code == 400 else None
+    except Exception:
+        return None
+
+
+def _health_url_ok(url: str, timeout: float = 5.0) -> bool:
+    import urllib.request  # noqa: PLC0415
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(url.rstrip("/") + "/api/health", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
 
 def _tail(path: str, n: int) -> None:
     try:
@@ -391,57 +567,90 @@ def _tail(path: str, n: int) -> None:
         pass
 
 
-def _down(_rest: list) -> int:
+def _stop_pid(pid: int) -> None:
     import signal  # noqa: PLC0415
-    pid = _read_pid()
-    if not pid:
-        sys.stdout.write("kore is not running (no live pid in "
-                         f"{PIDFILE}).\n")
-        for p in (PIDFILE, RUNFILE):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
-        return 0
     try:
         os.kill(pid, signal.SIGTERM)
-    except OSError as e:
-        sys.stderr.write(f"could not signal pid {pid}: {e}\n")
-        return 1
+    except OSError:
+        return
     for _ in range(40):                       # up to ~10s for a clean exit
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
-            break
+            return
         time.sleep(0.25)
-    else:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
-    for p in (PIDFILE, RUNFILE):
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def _rm(*paths: str) -> None:
+    for p in paths:
         try:
             os.remove(p)
         except OSError:
             pass
-    sys.stdout.write(f"kore stopped (pid {pid}).\n")
+
+
+def _stop_client(quiet: bool = False) -> bool:
+    pid = _read_client_pid()
+    if pid:
+        _stop_pid(pid)
+        if not quiet:
+            sys.stdout.write(f"kore client stopped (pid {pid}).\n")
+    _rm(CLIENT_PIDFILE, CLIENT_RUNFILE)
+    return bool(pid)
+
+
+def _down(_rest: list) -> int:
+    """Stop whatever kore runs on THIS machine: the background board and/or the client."""
+    stopped = False
+    pid = _read_pid()
+    if pid:
+        _stop_pid(pid)
+        sys.stdout.write(f"kore server stopped (pid {pid}).\n")
+        stopped = True
+    _rm(PIDFILE, RUNFILE)
+    if pid and os.path.exists(LEGACY_PIDFILE):
+        _rm(LEGACY_PIDFILE, os.path.join(STATE_HOME, "kore.run"))
+    stopped = _stop_client() or stopped
+    if not stopped:
+        sys.stdout.write("kore is not running on this machine.\n")
     return 0
 
-
 def _status(_rest: list) -> int:
-    pid = _read_pid()
-    cfg = _runfile_read()
-    port = cfg.get("port", os.environ.get("WB_PORT", "8198"))
-    prefix = cfg.get("prefix", _env("BRIDGE_PREFIX"))
-    if not pid:
-        sys.stdout.write("kore is NOT running.  Start it with:  kore\n")
+    """What kore runs on THIS machine: the board and/or a client."""
+    pid, cpid = _read_pid(), _read_client_pid()
+    if not pid and not cpid:
+        sys.stdout.write("kore is NOT running on this machine.  Start the server with:  kore\n"
+                         "  (or join a server:  kore client --server <ip:port> --token <tok>)\n")
         return 1
-    live = _health_ok(cfg.get("host", os.environ.get("WB_HOST", "127.0.0.1")), port)
-    primary, local = _link(port)
-    sys.stdout.write(
-        f"kore is running  —  pid {pid}, prefix={prefix}, "
-        f"health={'ok' if live else 'NOT answering'}\n\n  👉  {primary}\n      {local}\n\n")
-    return 0 if live else 1
+    rc = 0
+    if pid:
+        cfg = _runfile_read()
+        port = cfg.get("port", os.environ.get("WB_PORT", "8198"))
+        prefix = cfg.get("prefix", _env("BRIDGE_PREFIX"))
+        live = _health_ok(cfg.get("host", os.environ.get("WB_HOST", "127.0.0.1")), port)
+        primary, local = _link(port)
+        sys.stdout.write(
+            f"kore server running  —  pid {pid}, prefix={prefix}, "
+            f"health={'ok' if live else 'NOT answering'}\n\n  👉  {primary}\n      {local}\n\n")
+        rc = 0 if live else 1
+    if cpid:
+        st = _client_status()
+        age = int(time.time() - float(st.get("at", 0) or 0)) if st else -1
+        if st.get("ok"):
+            state = f"registered as node {st.get('node_ip')}, last heartbeat {age}s ago"
+            if st.get("reachable") is False:
+                state += f"\n    ⚠ server cannot reach this agent: {st.get('reach_error')}"
+        else:
+            state = f"NOT registered: {st.get('error') or 'no heartbeat yet'}"
+            rc = 1
+        sys.stdout.write(f"kore client running  —  pid {cpid}, server {st.get('server', '?')}\n"
+                         f"    {state}\n    log: {CLIENT_LOGFILE}\n\n")
+    return rc
+
 
 
 # --------------------------------------------------------------------------- doctor

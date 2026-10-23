@@ -75,7 +75,7 @@ kore server is up  —  pid 12345, prefix=kore-
 
       (kore not installed there yet?  curl -fsSL https://raw.githubusercontent.com/Tiiiktak/kore/main/install.sh | sh)
 
-  logs:  ~/.kore/kore.log
+  logs:  ~/.kore/server-<host>.log
   stop:  kore down
 ```
 
@@ -99,8 +99,9 @@ xterm.js terminal into any pane (keystrokes, resize, scroll).
 
 ## Add another machine
 
-On the second machine, install kore with the same one-liner, then paste the join line the
-server printed:
+The dashboard shows exactly what to run: click **+ 添加机器** (next to **+ 新建**) for the
+install line and the join line, each with a copy button, plus the state of every machine
+that has joined. The same join line is printed when you start `kore`. On the new machine:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Tiiiktak/kore/main/install.sh | sh
@@ -108,25 +109,36 @@ kore client --server <server-ip>:8198 --token <agent-token>
 ```
 
 There is **no default** for `--server` or `--token`; both come from the server's join
-line. The client runs its agent in the foreground (Ctrl-C to leave the cluster). Within the
-agent TTL (~45s) the new machine's node appears in the dashboard roster, and you can start
-and drive sessions on it exactly like the server's own node.
+line. `kore client` runs **in the background** (like the server) and only returns once the
+server has accepted the machine, so problems are reported right away instead of as a node
+that never shows up:
+
+- server not reachable from this machine → says so (check the address and port);
+- wrong token → refused before anything is started or stopped;
+- joined, but the server cannot connect back to this machine's agent → joins anyway and
+  tells you which port to open (the node is listed, but its sessions cannot be driven yet).
+
+`kore status` shows the client's state, `kore down` takes the machine out again, and
+`kore client --foreground …` runs it attached to the terminal (systemd / debugging). The new
+node appears in the roster at once, and you can start and drive sessions on it exactly like
+the server's own node.
 
 **Network reachability is mutual** — open both directions:
 
 - client → server on the **dashboard port** (default `8198`): the client POSTs its
   heartbeat there.
-- server → client on the **agent port** (`KORE_AGENT_PORT`, `0` = OS-chosen): the engine
-  POSTs `/exec` and streams `/tap` there.
+- server → client on the **agent port** (default `8199`, `KORE_AGENT_PORT` to change; if
+  8199 is taken the agent picks a free port and reports it): the engine POSTs `/exec` and
+  streams `/tap` there.
 
 ### The `kore` command
 
 | command | what it does |
 |---|---|
 | `kore` / `kore server` (central node) | start the dashboard in the background, print a tokened link **and** the `kore client …` join command. Also a worker, so one machine needs nothing else. `kore server --restart` applies new config to a running board |
-| `kore client --server <ip:port> --token <tok>` | join THIS machine as a worker node (paste the server's join line); no defaults |
-| `kore down` | stop the background dashboard |
-| `kore status` | is it up? reprint the link |
+| `kore client --server <ip:port> --token <tok>` | join THIS machine as a worker node, in the background (paste the server's join line); no defaults. `--foreground` to stay attached |
+| `kore down` | stop whatever kore runs on this machine (the server and/or a client) |
+| `kore status` | what runs on this machine: the server (with its link) and/or a client (with its registration state) |
 | `kore upgrade` | update kore in place to the latest release — `--version vX.Y.Z` to pin, `--check` to only compare. Handles an install.sh install (re-runs the installer), a git clone (fast-forwards it) and a `uv tool` install (reinstalls from git) |
 | `kore --version` | print the installed version |
 | `kore mcp` | run the MCP-over-stdio server (stdout = protocol JSON only) |
@@ -191,7 +203,7 @@ below is a `KORE_*` name — that is the only spelling the code reads.
 | `KORE_AGENT_TOKEN` | *(minted)* | server↔client agent secret, and the client-join token. `kore server` mints one (`~/.kore/agent.token`, 0600) if unset. A client agent refuses to bind non-loopback without it. |
 | `KORE_AGENTS_FILE` | `~/.kore/agents.json` | the client-agent registry (node_ip → url) the server writes |
 | `KORE_AGENT_TTL` | `45` | seconds before a silent client is pruned from the roster |
-| `KORE_AGENT_PORT` | `0` | client agent bind port; `0` = OS-chosen, written to `agent.port` |
+| `KORE_AGENT_PORT` | `8199` | client agent bind port (falls back to a free port when 8199 is taken); `0` = always OS-chosen |
 | `KORE_AGENT_BIND` | `0.0.0.0` | client agent bind address |
 | `KORE_BRIDGE_URL` | *(set by `kore client`)* | the server's web base URL the client POSTs to; `kore client --server` sets it |
 | `KORE_NODE_IP` | *(autodetect)* | override a node's advertised IP (use the reachable one) |

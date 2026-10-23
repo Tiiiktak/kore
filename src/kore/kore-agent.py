@@ -35,7 +35,12 @@ from urllib.parse import parse_qs, urlsplit
 
 # ------------------------------------------------------------------------- config
 
-KORE_AGENT_PORT = int(os.environ.get("KORE_AGENT_PORT", "0") or "0")   # 0 => OS picks, portfile
+# The agent's listen port. The server must be able to reach it, so a FIXED default makes the
+# firewall rule easy to write; if it is taken we fall back to an OS-chosen port (portfile +
+# the registered agent_url always say which one). KORE_AGENT_PORT=0 asks for OS-chosen.
+DEFAULT_AGENT_PORT = 8199
+_port_env = os.environ.get("KORE_AGENT_PORT", "")
+KORE_AGENT_PORT = int(_port_env) if _port_env.strip() else DEFAULT_AGENT_PORT
 KORE_AGENT_BIND = os.environ.get("KORE_AGENT_BIND", "0.0.0.0")
 KORE_AGENT_TOKEN = os.environ.get("KORE_AGENT_TOKEN", "")
 # The server's web base URL (e.g. http://10.0.0.7:8198). A client agent POSTs its record
@@ -50,7 +55,11 @@ HEARTBEAT_S = float(os.environ.get("KORE_AGENT_HEARTBEAT_S", "15"))
 TAP_PULL_WAIT_S = float(os.environ.get("KORE_AGENT_TAP_WAIT_S", "2.0"))
 
 STATE_DIR = os.path.expanduser(os.environ.get("KORE_STATE_HOME") or "~/.kore")
-PORTFILE = os.path.join(STATE_DIR, "agent.port")
+# Per-host names: ~/.kore is often on shared storage (NFS/GPFS home), seen by every machine.
+_HOST = (socket.gethostname() or "host").split(".")[0]
+PORTFILE = os.path.join(STATE_DIR, f"agent-{_HOST}.port")
+# Outcome of the latest registration attempt, read by `kore client` / `kore status`.
+STATUSFILE = os.path.join(STATE_DIR, f"client-{_HOST}.status")
 
 IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 SESSION_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
@@ -364,16 +373,37 @@ class PaneTap:
 
 def _my_record(port: int) -> dict:
     return {"agent_url": f"http://{NODE_IP}:{port}", "last_seen": time.time(),
-            "started_at": STARTED_AT, "pid": os.getpid(), "sessions": list_kore_sessions()}
+            "started_at": STARTED_AT, "pid": os.getpid(), "sessions": list_kore_sessions(),
+            "hostname": socket.gethostname()}
 
 
-def publish(port: int) -> None:
-    """One heartbeat: POST our record to the server. Raises on failure — the heartbeat
-    loop logs it and tries again on the next beat."""
-    _register_via_bridge(_my_record(port))
+class RegisterRejected(RuntimeError):
+    """The server refused our token (HTTP 401/403): retrying cannot help."""
 
 
-def _register_via_bridge(rec: dict) -> None:
+def _write_status(**kw) -> None:
+    """Record the latest registration outcome for `kore client` / `kore status`."""
+    rec = {"at": time.time(), "pid": os.getpid(), "node_ip": NODE_IP,
+           "server": KORE_BRIDGE_URL, **kw}
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = f"{STATUSFILE}.tmp.{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump(rec, f)
+        os.replace(tmp, STATUSFILE)
+    except OSError:
+        pass
+
+
+def publish(port: int) -> dict:
+    """One heartbeat: POST our record to the server. Returns the server's answer (which
+    includes whether the server could reach us back). Raises on failure; RegisterRejected
+    when the token is refused."""
+    return _register_via_bridge(_my_record(port))
+
+
+def _register_via_bridge(rec: dict) -> dict:
+    import urllib.error
     import urllib.request
 
     body = json.dumps({"node_ip": NODE_IP, **rec}).encode("utf-8")
@@ -383,8 +413,18 @@ def _register_via_bridge(rec: dict) -> None:
     req = urllib.request.Request(KORE_BRIDGE_URL.rstrip("/") + "/api/agents/register",
                                  data=body, headers=headers, method="POST")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(req, timeout=10) as resp:
-        resp.read()
+    try:
+        with opener.open(req, timeout=10) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise RegisterRejected(f"server rejected the token (HTTP {exc.code})") from None
+        raise
+    try:
+        ans = json.loads(raw.decode("utf-8") or "{}")
+    except ValueError:
+        ans = {}
+    return ans if isinstance(ans, dict) else {}
 
 
 def unpublish() -> None:
@@ -393,13 +433,29 @@ def unpublish() -> None:
     return
 
 
-def heartbeat_loop(port: int, stop: threading.Event) -> None:
-    while not stop.is_set():
-        try:
-            publish(port)
-        except Exception as exc:  # noqa: BLE001 - a bad beat must not kill the daemon
-            log(f"heartbeat error: {exc!r}")
-        stop.wait(HEARTBEAT_S)
+def beat(port: int) -> bool:
+    """One heartbeat with its outcome recorded. False only when the token was rejected
+    (the caller then shuts down: retrying a wrong token forever helps nobody)."""
+    try:
+        ans = publish(port)
+    except RegisterRejected as exc:
+        log(f"REGISTRATION REFUSED by {KORE_BRIDGE_URL}: {exc}. Check --token.")
+        _write_status(ok=False, rejected=True, error=str(exc))
+        return False
+    except Exception as exc:  # noqa: BLE001 - transient: keep beating
+        log(f"heartbeat to {KORE_BRIDGE_URL} failed: {exc!r}")
+        _write_status(ok=False, rejected=False, error=f"{type(exc).__name__}: {exc}")
+        return True
+    _write_status(ok=True, agent_url=f"http://{NODE_IP}:{port}",
+                  reachable=ans.get("reachable"), reach_error=ans.get("reach_error", ""))
+    return True
+
+
+def heartbeat_loop(port: int, stop: threading.Event, on_rejected) -> None:
+    while not stop.wait(HEARTBEAT_S):
+        if not beat(port):
+            on_rejected()
+            return
 
 
 # ============================================================================= HTTP
@@ -589,7 +645,16 @@ def main() -> int:
     if not KORE_AGENT_TOKEN:
         log("WARNING: KORE_AGENT_TOKEN is empty — auth is OFF (bound to localhost only).")
 
-    httpd = ThreadingHTTPServer((KORE_AGENT_BIND, KORE_AGENT_PORT), Handler)
+    try:
+        httpd = ThreadingHTTPServer((KORE_AGENT_BIND, KORE_AGENT_PORT), Handler)
+    except OSError as exc:
+        if not _port_env.strip() and KORE_AGENT_PORT == DEFAULT_AGENT_PORT:
+            # The default port is taken (another agent, or anything else): fall back to an
+            # OS-chosen one rather than fail. An explicit KORE_AGENT_PORT is honoured strictly.
+            log(f"port {DEFAULT_AGENT_PORT} unavailable ({exc}); using an OS-chosen port")
+            httpd = ThreadingHTTPServer((KORE_AGENT_BIND, 0), Handler)
+        else:
+            raise
     httpd.daemon_threads = True
     port = httpd.server_address[1]
     _write_portfile(port)
@@ -597,17 +662,13 @@ def main() -> int:
         f"url=http://{NODE_IP}:{port}, auth={'on' if KORE_AGENT_TOKEN else 'OFF'})")
 
     stop = threading.Event()
-    publish(port)  # seed the registry before the first heartbeat interval elapses
-    threading.Thread(target=heartbeat_loop, args=(port, stop), daemon=True,
-                     name="kore-agent-heartbeat").start()
+    # Serve FIRST, then register: the server probes this agent back while answering the
+    # registration (to tell the user whether server -> client works), so the agent must
+    # already be answering requests when the first POST goes out.
+    threading.Thread(target=httpd.serve_forever, daemon=True, name="kore-agent-http").start()
 
     def _shutdown(signum, frame):  # noqa: ARG001
         stop.set()
-        try:
-            unpublish()
-        except Exception:  # noqa: BLE001
-            pass
-        raise KeyboardInterrupt
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
@@ -615,17 +676,34 @@ def main() -> int:
         except (ValueError, OSError):
             pass
 
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        stop.set()
-        try:
-            unpublish()
-        except Exception:  # noqa: BLE001
+    # Seed the registration before the first heartbeat interval elapses. A refused token is
+    # final (exit 3); any other failure is transient and the heartbeat keeps retrying.
+    rc = 0
+    if beat(port):
+        threading.Thread(target=heartbeat_loop, args=(port, stop, stop.set), daemon=True,
+                         name="kore-agent-heartbeat").start()
+        while not stop.wait(1.0):
             pass
-    return 0
+        if os.path.exists(STATUSFILE) and _rejected_now():
+            rc = 3
+    else:
+        rc = 3
+    httpd.shutdown()
+    httpd.server_close()
+    try:
+        unpublish()
+    except Exception:  # noqa: BLE001
+        pass
+    return rc
+
+
+def _rejected_now() -> bool:
+    try:
+        with open(STATUSFILE) as f:
+            d = json.load(f)
+        return bool(d.get("rejected")) and d.get("pid") == os.getpid()
+    except (OSError, ValueError):
+        return False
 
 
 if __name__ == "__main__":

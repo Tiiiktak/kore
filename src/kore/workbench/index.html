@@ -472,6 +472,20 @@
   .form.open{display:block}
   .form label{display:block; color:var(--dim); font-size:11.5px; font-weight:500; margin:12px 0 5px}
   .form > label:first-child{margin-top:0}
+  /* 「添加机器」面板：复用 .form 的收起/展开。两步命令各一行，等宽、可整行复制。 */
+  .join-step{color:var(--dim); font-size:11.5px; font-weight:500; margin:14px 0 6px}
+  .join-step:first-child{margin-top:0}
+  .join-code{display:flex; gap:8px; align-items:stretch}
+  .join-code input{flex:1 1 auto; min-width:0; font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+    font-size:11.5px; background:var(--panel); color:var(--text)}
+  .join-code button{flex:0 0 auto; padding:0 14px; font-size:12px}
+  .join-note{color:var(--faint); font-size:11.5px; line-height:1.6; margin-top:12px}
+  .join-note code{font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace; color:var(--dim)}
+  .join-cl{display:flex; gap:8px; align-items:baseline; font-size:11.5px; padding:3px 0}
+  .join-cl .ip{font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace; color:var(--text)}
+  .join-cl .st{flex:0 0 auto; font-weight:600}
+  .join-cl .st.ok{color:var(--ok)} .join-cl .st.warn{color:var(--busy)} .join-cl .st.off{color:var(--faint)}
+  .join-cl .why{color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
   .k-btns{display:flex; gap:8px; margin-top:16px}
   .k-btns button{padding:7px 16px; font-size:12px}
   .jobs{padding:8px 16px; font-size:11px; color:var(--dim)}
@@ -987,7 +1001,12 @@
              的那条路上。黑色留给表单里的「起」。
              理由：`+ 新建` 本身并不写任何东西，它只是 toggle 表单（见 `c-new.onclick`），
              真正 POST 的是「起」。 -->
+        <button id="c-join" title="把另一台机器加进来，当作 worker 节点">+ 添加机器</button>
         <button id="c-new" title="展开建 session 的表单（本身不写任何东西，真正下手的是表单里的「起」）">+ 新建</button>
+      </div>
+      <!-- 添加机器：只读面板（GET /api/join），把「在另一台机器上执行什么」直接摆出来。 -->
+      <div class="form" id="c-joinp"><div id="c-joinp-body">载入中…</div>
+        <div class="k-btns"><button id="c-joinp-close">收起</button></div>
       </div>
       <div class="form" id="c-form">
         <label for="c-f-node">节点</label><select id="c-f-node"></select>
@@ -2602,7 +2621,55 @@ $('c-refresh').onclick = async ev => {
   try { await kTick(true); note('已刷新'); }
   finally { b.classList.remove('spin'); b.disabled = false; }
 };
-$('c-new').onclick = () => $('c-form').classList.toggle('open');
+$('c-new').onclick = () => { $('c-joinp').classList.remove('open'); $('c-form').classList.toggle('open'); };
+/* 添加机器面板。数据来自 GET /api/join（WB token 鉴权，和其他读一样）。 */
+async function kJoinLoad() {
+  const box = $('c-joinp-body');
+  let d;
+  try { d = await apiGet('/api/join'); }
+  catch (e) { box.textContent = '取不到加入信息：' + e.message; return; }
+  if (!d.enabled) {
+    box.innerHTML = '<div class="join-note">这台 server 没有设置 agent token，不能接受其他机器加入。' +
+      '用 <code>kore</code> 启动的 server 会自动生成；如果是手工起的，请设置 <code>KORE_AGENT_TOKEN</code> 后重启。</div>';
+    return;
+  }
+  const row = (id, val) => `<div class="join-code"><input id="${id}" readonly value="${esc(val)}">` +
+    `<button data-copy="${id}">复制</button></div>`;
+  const cl = (d.clients || []).map(c => {
+    const st = !c.online ? ['off', '离线'] : (c.reachable === false ? ['warn', '连不回'] : ['ok', '在线']);
+    const why = !c.online ? `${c.last_seen_s}s 前最后一次心跳`
+      : (c.reachable === false ? `server 连不上它的 agent：${c.reach_error}` : `${c.sessions} 个 session`);
+    return `<div class="join-cl"><span class="st ${st[0]}">${st[1]}</span>` +
+      `<span class="ip">${esc(c.node_ip)}</span><span class="why" title="${esc(why)}">${esc((c.hostname || '').split('.')[0])} · ${esc(why)}</span></div>`;
+  }).join('');
+  box.innerHTML =
+    `<div class="join-step">① 在新机器上安装 kore（已经装过可以跳过）</div>${row('c-join-install', d.install)}` +
+    `<div class="join-step">② 在新机器上执行，加入这台 server（后台运行）</div>${row('c-join-cmd', d.command)}` +
+    `<div class="join-note">网络需要双向可达：新机器 → 本 server 的 <code>${esc(d.server)}</code>；` +
+    `本 server → 新机器的 agent 端口（默认 <code>${d.agent_port}</code>）。<code>kore client</code> 会检查这两个方向并直接告诉你哪里不通。` +
+    `约 ${d.ttl_s} 秒内新节点会出现在名单里。在新机器上停止：<code>kore down</code>。` +
+    `<br>这条命令里带着 agent token，相当于新机器的接入密钥，只发给你信任的机器。</div>` +
+    (cl ? `<div class="join-step">已加入的机器</div>${cl}` : '');
+}
+$('c-join').onclick = () => {
+  $('c-form').classList.remove('open');
+  const p = $('c-joinp');
+  if (p.classList.toggle('open')) kJoinLoad();
+};
+$('c-joinp-close').onclick = () => $('c-joinp').classList.remove('open');
+$('c-joinp').addEventListener('click', async ev => {
+  const b = ev.target.closest('button[data-copy]'); if (!b) return;
+  const inp = $(b.dataset.copy); if (!inp) return;
+  let ok = false;
+  try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(inp.value); ok = true; } }
+  catch (e) { /* 走下面的回退 */ }
+  if (!ok) {   // http:// 下没有 Clipboard API：选中再 execCommand，失败也至少把整行选中了
+    inp.focus(); inp.select();
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  }
+  b.textContent = ok ? '已复制' : '已选中，按 Ctrl+C';
+  setTimeout(() => { b.textContent = '复制'; }, 1600);
+});
 $('c-f-cancel').onclick = () => $('c-form').classList.remove('open');
 $('c-f-go').onclick = async () => {
   const name = $('c-f-name').value.trim();

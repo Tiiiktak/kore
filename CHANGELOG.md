@@ -4,6 +4,34 @@ All notable changes to **kore** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-10-23
+
+### Added
+- **"+ 添加机器" in the dashboard.** Shows the install line and the exact `kore client …`
+  join line (each with a copy button), the network requirements, and every machine that has
+  joined: online / offline / joined-but-unreachable, with the reason. Backed by a new
+  read-only `GET /api/join` (WB token).
+
+### Changed
+- **`kore client` runs in the background** and only returns once the server has accepted
+  the machine. Before starting anything it checks that the server is reachable and that the
+  token is right (a typo never stops a working client), then waits for the first
+  registration and reports whether the server can connect back to this machine's agent.
+  `--foreground` keeps the old attached behaviour.
+- `kore status` / `kore down` cover both roles on a machine (server and/or client).
+- The client agent listens on a **fixed default port, 8199** (falls back to a free port when
+  taken), so the firewall rule for "server → client" is predictable.
+- Runtime files are per host (`server-<host>.pid`, `client-<host>.log`, …): `~/.kore` is often
+  on shared storage, and a pid written on one machine must never be signalled from another.
+
+### Fixed
+- **A client could silently fail to join or drop out.** The agent crashed if the very first
+  registration failed, kept retrying a rejected token forever, ran only while its terminal
+  stayed open, and never learned that the server could not reach it back. Each of these is
+  now reported (and a rejected token stops the agent).
+- The server probes a client's agent when it registers (`reachable` in the reply), so
+  "joined but unreachable" is visible in the CLI and the dashboard.
+
 ## [0.3.5] — 2026-10-23
 
 ### Changed
@@ -124,6 +152,7 @@ more machines, from a web dashboard or as MCP tools, with an explicit server/cli
   `py_compile`, the routing tests, a packaging smoke that installs the wheel and asserts the
   data files ship) and a tag-triggered Release that builds the wheel + sdist.
 
+[0.4.0]: https://github.com/Tiiiktak/kore/releases/tag/v0.4.0
 [0.3.5]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.5
 [0.3.4]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.4
 [0.3.3]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.3
