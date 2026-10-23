@@ -4,6 +4,26 @@ All notable changes to **kore** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] — 2026-10-23
+
+### Changed
+- **The window follows whoever is using it.** v0.3.2 made an attached terminal always win,
+  which left the dashboard stuck at the terminal's size. Now, while the dashboard has focus
+  it fits the window to the browser; when it loses focus (you switch to your own
+  `tmux attach`, another window or tab) the window is released to tmux and your terminal
+  gets its size back; returning to the dashboard fits it again. Emulates tmux 3.1's
+  `window-size latest` on every version (release = `set-option -w -u`).
+- **Mobile input box appears on demand.** The native compose box (for IME / voice input) is
+  hidden by default; tap the terminal or the new ⌨ key in the key bar to show it. It hides
+  itself when it loses focus while empty (a half-written draft stays).
+
+### Added
+- **tmux upgrade guidance.** `kore doctor` warns when tmux is older than 3.0, says which
+  feature degrades, and prints upgrade commands for this machine (apt / dnf / yum / apk /
+  pacman / zypper / Homebrew, conda-forge when available, or building from source). `kore`
+  prints a one-line note at startup on an old tmux. Old tmux still works — this is guidance,
+  not a requirement.
+
 ## [0.3.2] — 2026-10-23
 
 ### Fixed
@@ -87,6 +107,7 @@ more machines, from a web dashboard or as MCP tools, with an explicit server/cli
   `py_compile`, the routing tests, a packaging smoke that installs the wheel and asserts the
   data files ship) and a tag-triggered Release that builds the wheel + sdist.
 
+[0.3.3]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.3
 [0.3.2]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.2
 [0.3.1]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.0

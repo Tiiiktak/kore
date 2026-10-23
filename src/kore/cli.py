@@ -250,6 +250,13 @@ def _server_banner(pid: int, port: str, prefix: str, tok: str, *, already: bool)
         f"      {_join_cmd(port, tok)}\n\n"
         f"      (kore not installed there yet?  curl -fsSL {INSTALL_URL} | sh)\n\n"
         f"  logs:  {LOGFILE}\n  stop:  kore down\n\n")
+    if shutil.which("tmux"):
+        tv, ver = _tmux_version()
+        if ver is not None and ver < TMUX_RECOMMENDED:
+            sys.stdout.write(
+                f"  ⚠  {tv} is older than {'.'.join(map(str, TMUX_RECOMMENDED))}: kore works, "
+                f"but {_tmux_degraded(ver)}.\n     Run `kore doctor` for how to upgrade "
+                f"tmux on this machine.\n\n")
 
 
 def _server(rest: list) -> int:
@@ -439,6 +446,77 @@ def _status(_rest: list) -> int:
 
 # --------------------------------------------------------------------------- doctor
 
+# kore runs on old tmux by degrading; this is the version everything works at natively.
+TMUX_RECOMMENDED = (3, 0)
+
+
+def _tmux_version() -> tuple:
+    """(raw `tmux -V` text, (major, minor) or None when unparseable — e.g. `tmux master`)."""
+    try:
+        tv = subprocess.run(["tmux", "-V"], capture_output=True, text=True,
+                            timeout=5).stdout.strip()
+    except Exception:  # noqa: BLE001
+        return "", None
+    m = re.search(r"(\d+)\.(\d+)", tv)
+    return tv, ((int(m.group(1)), int(m.group(2))) if m else None)
+
+
+def _tmux_degraded(ver: tuple) -> str:
+    """What an old tmux costs, in one line."""
+    if ver < (2, 9):
+        return ("the dashboard cannot fit the window to the browser (resize-window needs "
+                "2.9+), and typing uses a fallback path")
+    return "dashboard typing uses a fallback path (send-keys -H needs 3.0+)"
+
+
+def _os_release() -> dict:
+    out: dict = {}
+    try:
+        with open("/etc/os-release", encoding="utf-8") as f:
+            for line in f:
+                if "=" in line:
+                    k, v = line.rstrip("\n").split("=", 1)
+                    out[k] = v.strip('"')
+    except OSError:
+        pass
+    return out
+
+
+def _tmux_upgrade_steps() -> list:
+    """Concrete ways to get a newer tmux on THIS machine, most likely first.
+
+    The system package manager comes first, but an old distro can only offer an old tmux
+    (Ubuntu 18.04 ships 2.6), so options that do not depend on the distro follow."""
+    steps: list = []
+    sudo = "" if (hasattr(os, "geteuid") and os.geteuid() == 0) else "sudo "
+    if sys.platform == "darwin":
+        steps.append("brew install tmux        # or: brew upgrade tmux")
+    else:
+        osr = _os_release()
+        ids = f"{osr.get('ID', '')} {osr.get('ID_LIKE', '')}".lower()
+        if any(d in ids for d in ("debian", "ubuntu")) and shutil.which("apt-get"):
+            steps.append(f"{sudo}apt-get update && {sudo}apt-get install -y tmux"
+                         "   # older releases may still ship an old tmux")
+        elif any(d in ids for d in ("rhel", "centos", "fedora", "rocky", "alma")):
+            pm = "dnf" if shutil.which("dnf") else "yum"
+            steps.append(f"{sudo}{pm} install -y tmux"
+                         "   # EL7/EL8 repos ship tmux 1.8 / 2.7")
+        elif "alpine" in ids:
+            steps.append(f"{sudo}apk add tmux")
+        elif "arch" in ids:
+            steps.append(f"{sudo}pacman -S tmux")
+        elif "suse" in ids:
+            steps.append(f"{sudo}zypper install tmux")
+        if shutil.which("brew"):
+            steps.append("brew install tmux        # Homebrew on Linux, no root needed")
+    if shutil.which("conda") or shutil.which("mamba") or shutil.which("micromamba"):
+        tool = next(t for t in ("mamba", "micromamba", "conda") if shutil.which(t))
+        steps.append(f"{tool} install -y -c conda-forge tmux   # recent tmux, no root needed")
+    steps.append("build from source: https://github.com/tmux/tmux/releases "
+                 "(needs libevent + ncurses headers; ./configure && make && make install)")
+    return steps
+
+
 def _detect_node_ip() -> str:
     ip = _env("NODE_IP")
     if ip:
@@ -473,21 +551,16 @@ def _doctor(_rest: list) -> int:
             lvl = "WARN" if tool == "claude" else "FAIL"
             add(lvl, f"{tool} on PATH", "not found")
 
-    # tmux version: informational. kore degrades instead of requiring a minimum — older
-    # tmux only loses the browser-fits-the-window feature (needs `resize-window`, 2.9+).
+    # tmux version: kore degrades instead of requiring a minimum, so an old tmux is a WARN
+    # with upgrade steps (printed under the table), never a FAIL.
+    tmux_hint: list = []
     if shutil.which("tmux"):
-        try:
-            tv = subprocess.run(["tmux", "-V"], capture_output=True, text=True,
-                                timeout=5).stdout.strip()
-        except Exception:  # noqa: BLE001
-            tv = ""
-        m = re.search(r"(\d+)\.(\d+)", tv)
-        if not m:
+        tv, ver = _tmux_version()
+        if ver is None:
             add("PASS", "tmux version", tv or "unknown (assuming a recent build)")
-        elif (int(m.group(1)), int(m.group(2))) < (2, 9):
-            add("WARN", "tmux version",
-                f"{tv} — works; the browser shows the window at its own size instead of "
-                f"fitting it (resize-window needs tmux 2.9+)")
+        elif ver < TMUX_RECOMMENDED:
+            add("WARN", "tmux version", f"{tv} — works, but " + _tmux_degraded(ver))
+            tmux_hint = _tmux_upgrade_steps()
         else:
             add("PASS", "tmux version", tv)
 
@@ -547,6 +620,12 @@ def _doctor(_rest: list) -> int:
         worst = max(worst, rank[level])
         sys.stdout.write(f"  {mark[level]} {level:4} {label.ljust(width)}  {detail}\n")
     sys.stdout.write("\n")
+    if tmux_hint:
+        sys.stdout.write(f"  Upgrade tmux to {'.'.join(map(str, TMUX_RECOMMENDED))}+ "
+                         f"(any of these; then restart kore with `kore down && kore`):\n")
+        for line in tmux_hint:
+            sys.stdout.write(f"    {line}\n")
+        sys.stdout.write("\n")
     return 0 if worst < 2 else 1
 
 

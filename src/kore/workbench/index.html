@@ -850,7 +850,7 @@
     .ktab{max-width:150px; height:34px}
     #tab-home, #tab-new{width:36px; height:34px}
     /* 撰写框 + 额外按键条只在手机 + 终端可写时出现 */
-    #c-pane-modal.open.kbd #compose{display:flex}
+    #c-pane-modal.open.kbd.compose #compose{display:flex}   /* 点一下才出现,不常驻 */
     #c-pane-modal.open.kbd #kbar{display:flex}
 
     /* 元信息带：胶囊换行，不靠省略号。select.sw 的 max-width:min(300px,17vw) 在 390px
@@ -1027,7 +1027,7 @@
            流式语音合成（边说边改）会被打断、还有逐字回显的延迟。这里换成一个**原生**输入框：
            输入法、语音听写、流式改写全交给浏览器原生处理，本地即时回显零延迟；回车（或发送钮）
            才把整句经 paneInput 送进对面（Bearer+POST+confirm 同一扇写门）。空内容回车 = 单独回车。
-           只在手机 + 终端可写时出现（见 #c-pane-modal.open.kbd）。 -->
+           默认不出现：点一下终端或按键条上的 ⌨ 才出现，失焦且为空时自动收起（composeShow）。 -->
       <div id="compose">
         <textarea id="compose-in" rows="1" enterkeyhint="send"
           autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"
@@ -1041,6 +1041,7 @@
            Bearer+POST+confirm 一个字没松）。Ctrl 是 Termux 式「黏一次」修饰键：点亮后改写
            下一个键（软键盘的也算）。只在手机 + 当前终端可写时出现（见 #c-pane-modal.open.kbd）。 -->
       <div id="kbar" role="toolbar" aria-label="终端额外按键">
+        <button class="kb kb-mod" data-k="compose" aria-pressed="false" title="输入框（输入法 / 语音），点一下出现、再点收起">⌨</button>
         <button class="kb" data-k="esc" title="Esc（打断/退出菜单）">Esc</button>
         <button class="kb" data-k="tab" title="Tab">Tab</button>
         <button class="kb" data-k="stab" title="Shift+Tab（claude-code 切模式）">⇧Tab</button>
@@ -1922,7 +1923,8 @@ async function paneFitGeomNow() {
   // visibilitychange 的 paneGeomRelease),这期间对面被别的 client 重定尺寸会吐 geom 帧 /
   // 整屏重画,它们都会顺手勾一发 paneFitGeom —— 不挡的话会立刻又把对面借回浏览器盒子,
   // 和让渡打架,把同一个共享 window 的别的 client 又扣住。回前台由 visibilitychange 显式再借。
-  if (document.hidden) return;
+  // 没有焦点(人在用终端/别的窗口)也不借 —— 见下面 focus/blur 的焦点让渡。
+  if (document.hidden || !document.hasFocus()) return;
   // 「对面现在多大」问的是**对面最后报过的那个数**，不是本地终端的 cols/rows。这两个数
   // 原来永远相等（本地只跟着对面走），2026-10-12 之后不再是：可写目标开 pane 时本地会
   // 先按盒子调到位（见 paneLocalGeom），拿本地去比就会得出「已经一样了」，于是对面这一
@@ -1957,8 +1959,6 @@ async function paneFitGeomNow() {
     // 发一条 geom + 一发整屏重画过来（实测：从外面 `tmux resize-window` 也照样出 g）——
     // 那条路比这张回执晚不了多少，而且它是对面的真屏，不是我们这一发顺手带回来的那一瞬。
     if (paneTarget === s && paneWire !== 'bytes') paneEcho(d);
-    // 对面有人用真终端 attach 着:服务端没动窗口(他的终端说了算),这边按对面尺寸显示。
-    if (paneTarget === s && d && d.deferred) paneSay('有终端 attach 着这个 session,按它的尺寸显示');
   } catch (e) {
     // 失败要说出来，而且把 asked 清掉：下一次拖窗口还能再试。不 resync、不清屏 ——
     // 几何没变成想要的样子，屏上的内容仍然是真的，只是有滚动条。
@@ -1967,9 +1967,8 @@ async function paneFitGeomNow() {
   } finally { paneGeomBusy = false; }
 }
 /* 关 pane 的时候把对面「松开」。核心是一件事：
-     服务端每次 resize 之后都会立刻 `set-option -w -u window-size`(取消窗口级设置,回到用户
-     自己的 tmux 默认值,不写死任何版本才有的取值),而且有真实终端 attach 时根本不抢尺寸
-     (回执带 deferred:true,这边改为适配对面)。auto:true 仍然照发,保持兼容。
+     auto:true ⇒ 服务端在 resize 之后 `set-option -w -u window-size`(取消窗口级设置,回到
+     用户自己的 tmux 默认值;不写死 `latest` 这类只有新版 tmux 才认的取值)。
      `tmux resize-window` 会把那个 window 的 window-size 钉成 manual（tmux 3.4 上实测过
      show-options 的前后值），这个副作用比这次请求活得长：不松的话，别的 client（操作者自己
      的终端、另一台设备的板子）再 attach / 打开同一个会话，窗口都被钉在这块盒子的尺寸上不跟它们走
@@ -2400,6 +2399,10 @@ function paneSetKbd(on) {
   // 额外按键条只在「终端可写」时出现（CSS 还叠加了手机断点）；关闸时把黏住的 Ctrl 松开。
   $('c-pane-modal').classList.toggle('kbd', paneKbd);
   if (!paneKbd) paneSetCtrl(false);
+  // 每次开 pane / 换目标 / 关闸都从「撰写框收着」开始 —— 它只在点一下之后出现。
+  $('c-pane-modal').classList.remove('compose');
+  const cb = document.querySelector('#kbar button[data-k="compose"]');
+  if (cb) cb.setAttribute('aria-pressed', 'false');
   if (paneTerm) {
     paneTerm.options.disableStdin = !paneKbd;
     // 光标会眨 = 「这儿可以打字」。阶段4 删掉按钮之后这是唯一的那个信号，所以它必须准：
@@ -2416,9 +2419,10 @@ function paneSetKbd(on) {
   } else if (paneTerm) {
     // 手机窄屏：聚焦原生撰写框（输入法/语音在这里才正常），不碰 xterm 的隐藏 textarea；
     // 平板/桌面：照旧聚焦 xterm，直接打进终端。
+    // 手机窄屏：不自动弹任何键盘（撰写框默认收着，点一下终端或 ⌨ 才出现，见 composeShow）；
+    // 平板/桌面：照旧聚焦 xterm，直接打进终端。
     const narrowTouch = PANE_IS_TOUCH && window.matchMedia('(max-width:860px)').matches;
-    const ci = narrowTouch && $('compose-in');
-    if (ci) ci.focus(); else paneTerm.focus();   // 开完闸还要再点一下才能打字，等于闸开了一半
+    if (!narrowTouch) paneTerm.focus();   // 开完闸还要再点一下才能打字，等于闸开了一半
   }
   paneState();
 }
@@ -2704,6 +2708,11 @@ addEventListener('pagehide', () => {
    （跟 kCovered 一个道理：判断留在这边，shell 只拿结果）。
    切后台（标签切走 / 手机锁屏回桌面）：把 window 交还给 tmux，但留着 paneGeomBorrowed —— 人还在
    看这个 pane，回前台再借一次。回前台：再贴合一次盒子。没开 pane 就与几何无关，直接不管。 */
+/* 焦点让渡:模拟 tmux 3.1+ 的 `window-size latest`(谁在用,窗口就跟谁),不依赖 tmux 版本。
+   网页失去焦点(切去自己的终端 / 别的窗口)就把 window 交还给 tmux,attach 着的终端立刻拿回
+   自己的尺寸;回到网页再借,网页重新铺满。和 visibilitychange 同一套 release / 再借。 */
+addEventListener('blur', () => { if (kCovered() && paneGeomBorrowed) paneGeomRelease(); });
+addEventListener('focus', () => { if (kCovered()) paneFitGeom(0); });
 function kVisibility(hidden) {
   if (!kCovered()) return;
   if (hidden) { if (paneGeomBorrowed) paneGeomRelease(); }
@@ -2765,18 +2774,29 @@ $('kbar').addEventListener('click', ev => {
   const b = ev.target.closest('button.kb'); if (!b) return;
   const k = b.dataset.k;
   if (k === 'ctrl') { paneSetCtrl(!paneCtrl); return; }   // 黏一次：改写下一个键
+  if (k === 'compose') { composeShow(!composeOn()); return; }
   const seq = KBAR_SEQ[k]; if (!seq) return;
   paneInput(seq);
-  const ci = $('compose-in');
-  // 方向/Esc/Tab 之后把焦点还给撰写框（手机）或终端，别让软键盘收起。
-  if (ci && window.matchMedia('(max-width:860px)').matches) ci.focus();
-  else if (paneTerm) paneTerm.focus();
+  // 方向/Esc/Tab 之后：撰写框开着就把焦点还给它，别让软键盘收起；收着就不弹键盘
+  // （手机）；桌面/平板还给终端。
+  if (composeOn()) $('compose-in').focus();
+  else if (paneTerm && !window.matchMedia('(max-width:860px)').matches) paneTerm.focus();
 });
 
 /* ── 移动端原生撰写框 ──────────────────────────────────────────────
    在真正的 <textarea> 里撰写：输入法、语音听写、流式「边说边改」全由浏览器原生处理，
    本地即时回显、零往返延迟。回车（非合成态、非 Shift）或发送钮 → 把整句经 paneInput
    送进对面并清空；空内容回车 = 单独一个回车（给菜单确认用）。 */
+function composeOn() { return $('c-pane-modal').classList.contains('compose'); }
+function composeShow(on) {
+  const m = $('c-pane-modal'), ci = $('compose-in');
+  if (!ci || on === composeOn()) { if (on && ci) ci.focus(); return; }
+  m.classList.toggle('compose', on);
+  const b = document.querySelector('#kbar button[data-k="compose"]');
+  if (b) b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  if (on) { composeGrow(); ci.focus(); } else ci.blur();
+  paneFitGeom();   // 底部那一簇变高/变矮，终端盒子跟着变，重新贴合对面
+}
 function composeGrow() {
   const ci = $('compose-in'); if (!ci) return;
   ci.style.height = 'auto';
@@ -2793,6 +2813,20 @@ $('compose-in').addEventListener('keydown', ev => {
   if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); composeSend(); }
 });
 $('compose-send').addEventListener('click', ev => { ev.preventDefault(); composeSend(); });
+// 点发送钮不许先抢走撰写框的焦点（否则下面的失焦收起会先把它藏掉）。
+$('compose-send').addEventListener('pointerdown', ev => ev.preventDefault());
+// 失焦且没写东西 ⇒ 收起；写了一半就留着，免得点一下别处把草稿藏起来。
+$('compose-in').addEventListener('blur', () => {
+  setTimeout(() => {
+    const ci = $('compose-in');
+    if (document.activeElement !== ci && !ci.value.trim()) composeShow(false);
+  }, 150);
+});
+// 手机窄屏：点一下终端区域（不是拖动滚屏 —— click 只在轻点时触发）⇒ 撰写框出现。
+$('c-pane-term').addEventListener('click', () => {
+  if (PANE_IS_TOUCH && window.matchMedia('(max-width:860px)').matches
+      && $('c-pane-modal').classList.contains('kbd')) composeShow(true);
+});
 
 /* 软键盘让位：手机软键盘弹出时 visualViewport 变矮。把终端弹窗底边抬到键盘顶上 ——
    末尾那条 in-flow 的 #kbar 就正好浮在键盘上方（和 Termux 的 extra-keys 一样在键盘上面），

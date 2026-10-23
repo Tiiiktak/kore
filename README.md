@@ -169,6 +169,16 @@ kore/                            repo root
 - **Each client machine**: the same — Python 3.8+, `tmux`, `claude`. It runs the agent
   (stdlib only). The server must be able to reach the client's agent port over the network,
   and the client must be able to reach the server's dashboard port.
+- **tmux 3.0+ is recommended, not required.** Older tmux works with degraded features (below
+  2.9 the dashboard cannot fit the window to the browser). `kore doctor` reports your tmux
+  version and prints concrete upgrade commands for your system (package manager, Homebrew,
+  conda-forge, or building from source), and `kore` warns at startup when tmux is old.
+
+**Window size, browser vs your own terminal.** A tmux window has one size shared by every
+client. kore follows whoever is using it: while the dashboard has focus it fits the window
+to the browser; the moment you switch away (to your own `tmux attach`, another window or
+tab) the window is handed back to tmux and your terminal gets its own size back. This works
+on every tmux version (it emulates tmux 3.1's `window-size latest`).
 
 ## Configure
 
