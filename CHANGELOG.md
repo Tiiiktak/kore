@@ -4,10 +4,16 @@ All notable changes to **kore** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] — 2026-10-23
+
+### Changed
+- The mobile input-box toggle is a simple, larger line keyboard icon (rounded frame, one
+  row of key dots, a space bar) instead of the pencil from 0.3.4.
+
 ## [0.3.4] — 2026-10-23
 
 ### Changed
-- The mobile input-box toggle is a larger, plain pencil icon instead of the ⌨ glyph.
+- The mobile input-box toggle is a larger icon instead of the ⌨ glyph.
 - `kore doctor` adds a non-warning note on tmux 3.0.x: fine for kore, while 3.1+ is nicer
   when one session is attached from several terminals at once.
 
@@ -118,6 +124,7 @@ more machines, from a web dashboard or as MCP tools, with an explicit server/cli
   `py_compile`, the routing tests, a packaging smoke that installs the wheel and asserts the
   data files ship) and a tag-triggered Release that builds the wheel + sdist.
 
+[0.3.5]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.5
 [0.3.4]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.4
 [0.3.3]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.3
 [0.3.2]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.2

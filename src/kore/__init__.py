@@ -16,4 +16,4 @@ are shipped as package data and run by path, not imported as modules:
 See `kore.cli` for the subcommand dispatch (server/client/mcp/ops/doctor).
 """
 
-__version__ = "0.3.4"
+__version__ = "0.3.5"
