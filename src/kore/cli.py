@@ -561,6 +561,13 @@ def _doctor(_rest: list) -> int:
         elif ver < TMUX_RECOMMENDED:
             add("WARN", "tmux version", f"{tv} — works, but " + _tmux_degraded(ver))
             tmux_hint = _tmux_upgrade_steps()
+        elif ver < (3, 1):
+            # Not a warning: kore itself gets nothing from 3.1. Outside kore, 3.1's
+            # `window-size latest` sizes a window shared by several real terminals to the
+            # one in use (3.0 gives every terminal the same size, clipping or padding some).
+            add("PASS", "tmux version",
+                f"{tv} (fine for kore; 3.1+ is nicer if you attach one session from "
+                f"several terminals at once — the window follows the one you're using)")
         else:
             add("PASS", "tmux version", tv)
 

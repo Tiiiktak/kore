@@ -742,6 +742,11 @@
   .kb:active{background:var(--line)}
   /* 黏住的 Ctrl：珊瑚实底（填充，不是描边/线） */
   .kb-mod[aria-pressed="true"]{background:var(--claude); color:#fff}
+  /* 输入框开关：一支线条铅笔（不用键盘图形），比文字键大一号；开着时同 Ctrl 一样珊瑚实底 */
+  .kb-compose{padding:0 11px}
+  .kb-compose[aria-pressed="true"]{background:var(--claude); color:#fff}
+  .kb-ico{width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:2;
+          stroke-linecap:round; stroke-linejoin:round}
   .kb-sep{flex:0 0 auto; width:10px}   /* 修饰键与方向键之间留一道空隙，不画线 */
   /* 键盘弹出时：按键条紧贴键盘顶，底部只留一丢丢（不再叠 home-indicator 安全区）。 */
   #c-pane-modal.kbd-up #kbar{padding-bottom:6px}
@@ -1027,7 +1032,7 @@
            流式语音合成（边说边改）会被打断、还有逐字回显的延迟。这里换成一个**原生**输入框：
            输入法、语音听写、流式改写全交给浏览器原生处理，本地即时回显零延迟；回车（或发送钮）
            才把整句经 paneInput 送进对面（Bearer+POST+confirm 同一扇写门）。空内容回车 = 单独回车。
-           默认不出现：点一下终端或按键条上的 ⌨ 才出现，失焦且为空时自动收起（composeShow）。 -->
+           默认不出现：点一下终端或按键条上的铅笔键才出现，失焦且为空时自动收起（composeShow）。 -->
       <div id="compose">
         <textarea id="compose-in" rows="1" enterkeyhint="send"
           autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"
@@ -1041,7 +1046,7 @@
            Bearer+POST+confirm 一个字没松）。Ctrl 是 Termux 式「黏一次」修饰键：点亮后改写
            下一个键（软键盘的也算）。只在手机 + 当前终端可写时出现（见 #c-pane-modal.open.kbd）。 -->
       <div id="kbar" role="toolbar" aria-label="终端额外按键">
-        <button class="kb kb-mod" data-k="compose" aria-pressed="false" title="输入框（输入法 / 语音），点一下出现、再点收起">⌨</button>
+        <button class="kb kb-compose" data-k="compose" aria-pressed="false" aria-label="输入框" title="输入框（输入法 / 语音），点一下出现、再点收起"><svg class="kb-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg></button>
         <button class="kb" data-k="esc" title="Esc（打断/退出菜单）">Esc</button>
         <button class="kb" data-k="tab" title="Tab">Tab</button>
         <button class="kb" data-k="stab" title="Shift+Tab（claude-code 切模式）">⇧Tab</button>
@@ -2419,7 +2424,7 @@ function paneSetKbd(on) {
   } else if (paneTerm) {
     // 手机窄屏：聚焦原生撰写框（输入法/语音在这里才正常），不碰 xterm 的隐藏 textarea；
     // 平板/桌面：照旧聚焦 xterm，直接打进终端。
-    // 手机窄屏：不自动弹任何键盘（撰写框默认收着，点一下终端或 ⌨ 才出现，见 composeShow）；
+    // 手机窄屏：不自动弹任何键盘（撰写框默认收着，点一下终端或铅笔键才出现，见 composeShow）；
     // 平板/桌面：照旧聚焦 xterm，直接打进终端。
     const narrowTouch = PANE_IS_TOUCH && window.matchMedia('(max-width:860px)').matches;
     if (!narrowTouch) paneTerm.focus();   // 开完闸还要再点一下才能打字，等于闸开了一半
@@ -2765,7 +2770,7 @@ const KBAR_SEQ = {
 let paneCtrl = false;      // 黏一次 Ctrl 是否点亮（见 paneInput / paneSetKbd）
 function paneSetCtrl(on) {
   paneCtrl = !!on;
-  const b = document.querySelector('#kbar .kb-mod');
+  const b = document.querySelector('#kbar button[data-k="ctrl"]');
   if (b) b.setAttribute('aria-pressed', paneCtrl ? 'true' : 'false');
 }
 // pointerdown 上 preventDefault：点按键条不抢走终端焦点，否则软键盘收起、还得再点终端。
