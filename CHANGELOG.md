@@ -4,6 +4,22 @@ All notable changes to **kore** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-10-23
+
+### Added
+- **Sessions are grouped by machine.** Each node gets a header — `server` (this host) or
+  `client`, its name, hostname, IP and session count — and its own color as a stripe on
+  every row and as a ring around the session's icon in the tabs. Machines that have joined
+  but have no sessions yet are listed too.
+- **Icons and nicknames.** A set of small 2-line ASCII icons (fruits and animals, drawn
+  with the same quadrant block characters as the kore logo) on a light background. Every
+  session and machine gets one automatically from its name (FNV-1a hash → icon + background,
+  the same on every device). Click the icon to set a nickname and/or pick another icon;
+  labels are stored on the server (`~/.kore/labels.json`, `POST /api/labels`), so every
+  device shows the same names. Tabs, the terminal title and the node picker use them.
+- **Tabs on the top or on the left.** A button at the top right moves the session tabs into
+  a left sidebar and back (remembered per browser). Wide screens only; phones keep the top bar.
+
 ## [0.4.1] — 2026-10-23
 
 ### Fixed
@@ -160,6 +176,7 @@ more machines, from a web dashboard or as MCP tools, with an explicit server/cli
   `py_compile`, the routing tests, a packaging smoke that installs the wheel and asserts the
   data files ship) and a tag-triggered Release that builds the wheel + sdist.
 
+[0.5.0]: https://github.com/Tiiiktak/kore/releases/tag/v0.5.0
 [0.4.1]: https://github.com/Tiiiktak/kore/releases/tag/v0.4.1
 [0.4.0]: https://github.com/Tiiiktak/kore/releases/tag/v0.4.0
 [0.3.5]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.5

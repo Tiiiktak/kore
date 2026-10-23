@@ -95,7 +95,13 @@ git clone https://github.com/Tiiiktak/kore && cd kore
 ```
 
 From the dashboard you can list sessions, create/kill a kore session, and open a live
-xterm.js terminal into any pane (keystrokes, resize, scroll).
+xterm.js terminal into any pane (keystrokes, resize, scroll). Sessions are grouped by the
+machine they run on (the server's own host first, then each client, each with its own
+color). Every session and machine gets a small ASCII icon — fruits and animals, picked
+automatically from its name — and you can give it a nickname or pick another icon by
+clicking that icon (saved on the server, so every device sees the same names). The
+session tabs sit along the top or, on wide screens, in a left sidebar — toggle with the
+button at the top right.
 
 ## Add another machine
 
@@ -226,8 +232,9 @@ Other engine env (all optional): `KORE_BRIDGE_PREFIX` (tmux name prefix, default
 
 `GET /api/state` · `/api/kore/roster` · `/api/kore/read` · `/api/kore/stream` (SSE line-diff) ·
 `/api/kore/bytes` (SSE byte relay) · `/api/kore/status` · `/api/kore/jobs` · `/api/kore/job` ·
-`/api/agents` (the client registry, TTL-pruned).
+`/api/agents` (the client registry, TTL-pruned) · `/api/join` (the add-a-machine panel).
 `POST /api/kore/{start,stop,send,keys,input,resize}` drives a session.
+`POST /api/labels` sets a nickname / icon for a node or session (dashboard-only, no node is touched).
 `POST /api/agents/register` is the client registry-push door — fenced by `KORE_AGENT_TOKEN`,
 a **different** token domain from the dashboard's WB token.
 

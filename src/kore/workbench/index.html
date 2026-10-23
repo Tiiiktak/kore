@@ -131,7 +131,7 @@
   .ktab:hover .ktab-x, .ktab[data-active="true"] .ktab-x{opacity:1}
   .ktab-x:hover{background:var(--bad-bg); color:var(--bad)}
   /* Home / + 新建：同一套无边框图标钮，状态靠填充 */
-  #tab-home, #tab-new{
+  #tab-home, #tab-new, #tab-side{
     flex:0 0 auto; display:flex; align-items:center; justify-content:center;
     height:30px; border-radius:7px; cursor:pointer;
     color:var(--dim); background:transparent; border:0;
@@ -139,7 +139,31 @@
   }
   #tab-home{width:32px}
   #tab-new{width:30px}
-  #tab-home:hover, #tab-new:hover{background:var(--ov-hover); color:var(--text)}
+  #tab-side{width:30px}
+  #tab-home:hover, #tab-new:hover, #tab-side:hover{background:var(--ov-hover); color:var(--text)}
+  .tb-lbl{display:none}
+  /* ── 标签栏放左侧（右上角按钮切换，存 localStorage）。只在宽屏生效：窄屏（手机）上侧栏
+     会吃掉一半屏幕，所以那里永远是顶栏，按钮也藏起来。 ── */
+  @media (min-width:861px){
+    html.tabs-left{--sidebar-w:232px; --titlebar-h:0px}
+    html.tabs-left body{padding-left:var(--sidebar-w)}
+    html.tabs-left header#titlebar{position:fixed; left:0; top:0; bottom:0; width:var(--sidebar-w);
+      height:auto; min-height:0; flex-direction:column; align-items:stretch; gap:3px;
+      padding:12px 10px; box-shadow:inset -1px 0 0 var(--line)}
+    html.tabs-left .brand{padding:2px 8px 12px; margin:0}
+    html.tabs-left #tab-home, html.tabs-left #tab-new{width:100%; justify-content:flex-start;
+      gap:9px; padding:0 10px; height:34px}
+    html.tabs-left .tb-lbl{display:inline; font-size:12.5px; font-weight:500}
+    html.tabs-left #tabstrip{flex:0 1 auto; min-height:0; flex-direction:column; align-items:stretch;
+      overflow-x:hidden; overflow-y:auto; -webkit-mask-image:none; mask-image:none}
+    html.tabs-left #tablist{flex-direction:column; align-items:stretch; gap:2px}
+    html.tabs-left .ktab{max-width:none; width:100%; height:36px; padding:0 7px 0 10px}
+    html.tabs-left .ktab-x{margin-left:auto}
+    html.tabs-left .tb-right{margin:auto 0 0; justify-content:space-between; padding:6px 2px 0}
+    html.tabs-left #tab-side{color:var(--text); background:var(--ov-hover)}
+    html.tabs-left #c-pane-modal{left:var(--sidebar-w)}
+  }
+  @media (max-width:860px){ #tab-side{display:none} }
   #tab-home[data-active="true"]{background:var(--panel); color:var(--text); box-shadow:var(--shadow)}
   #tab-home .ico, #tab-new .ico{width:15px; height:15px}
   .tb-right{flex:0 0 auto; display:flex; align-items:center; gap:8px; margin-left:auto}
@@ -379,6 +403,42 @@
      行之间只留极浅分隔线，靠留白分组。 */
   /* 2026-10-13 owner：行=巡检卡，主操作是打开终端 —— 整行可点进 pane（不止一颗钮）。 */
   .k-row{padding:12px 16px; cursor:pointer}
+  /* 节点分组：每台机器一个组头，组内每行左侧一条该节点的颜色。本机（server）固定珊瑚色，
+     其他机器按 IP 散列到一组易区分的颜色上（同一台机器每次都是同一个颜色）。 */
+  .k-row.has-nc{box-shadow:inset 3px 0 0 var(--nc)}
+  .k-node{display:flex; align-items:center; gap:8px; padding:12px 16px 6px;
+    font-size:11.5px; color:var(--dim); position:sticky; top:0; z-index:1; background:var(--panel)}
+  .k-row + .k-node, .k-none + .k-node{border-top:1px solid var(--line)}
+  .k-node b{color:var(--text); font-weight:600}
+  .k-node .badge{flex:0 0 auto; font-size:10px; font-weight:600; padding:1px 6px;
+    border-radius:4px; background:var(--nc); color:#fff}
+  .k-node .ip{font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace; color:var(--faint)}
+  .k-node .cnt{margin-left:auto; color:var(--faint)}
+  .k-none{padding:4px 16px 12px 16px; font-size:11.5px; color:var(--faint)}
+  /* ASCII 小图标（2 行四分格方块字，和品牌 logo 同一种画法）+ 浅色底 */
+  .kicon{margin:0; flex:0 0 auto; white-space:pre; line-height:.82; font-size:8px;
+    font-family:ui-monospace,Menlo,Consolas,monospace; padding:3px 4px; border-radius:6px;
+    user-select:none; text-align:center; width:6ch; box-sizing:content-box}   /* 定宽：5 列和 6 列的图标一样大 */
+  .kicon.sm{font-size:6px; padding:2px 3px; border-radius:5px}
+  .kicon.tab{font-size:6px; padding:2px 3px; border-radius:5px; box-shadow:0 0 0 1.5px var(--nc)}
+  .k-ibtn{flex:0 0 auto; border:0; background:none; padding:0; margin:0; min-width:0; height:auto;
+    cursor:pointer; display:inline-flex; border-radius:7px}
+  .k-ibtn:hover .kicon{box-shadow:0 0 0 2px var(--line)}
+  .k-real{margin-left:7px; font-weight:400; font-size:11px; color:var(--faint)}
+  /* 备注 / 图标对话框 */
+  #c-lbl{z-index:40}
+  .lbl-box{background:var(--panel); border-radius:14px; box-shadow:var(--shadow-lg);
+    width:min(440px,100%); max-height:100%; overflow:auto; padding:18px 20px}
+  .lbl-h{display:flex; align-items:center; gap:10px; font-size:14px}
+  .lbl-sub{color:var(--faint); font-size:11.5px; margin-top:4px}
+  .lbl-box label{display:block; color:var(--dim); font-size:11.5px; font-weight:500; margin:14px 0 6px}
+  .lbl-box input{width:100%}
+  .lbl-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(56px,1fr)); gap:6px}
+  .lbl-grid button{border:0; background:transparent; height:auto; padding:6px 2px; border-radius:8px;
+    display:flex; flex-direction:column; align-items:center; gap:4px; font-size:10px;
+    color:var(--faint); cursor:pointer}
+  .lbl-grid button:hover{background:var(--ov-hover)}
+  .lbl-grid button.on{background:var(--line2); box-shadow:inset 0 0 0 2px var(--claude); color:var(--text)}
   .k-row:hover{background:var(--ov-hover)}
   .k-row.protected{background:var(--accent-wash)}
   /* 键盘高亮（R7FIX-3 任务三）。左边一条实线 + 浅底，和 .protected 的底色可以叠加而不
@@ -949,6 +1009,7 @@
 </style>
 </head>
 <body>
+<script>try { if (localStorage.getItem('kore.tabs') === 'left') document.documentElement.classList.add('tabs-left'); } catch (e) {}</script>
 
 <header id="titlebar">
   <div class="brand">
@@ -961,13 +1022,18 @@
        data-active 标活动 Tab；关 Tab 只是从条上摘掉，不杀 session（杀仍走名单行那颗红钮）。 -->
   <button id="tab-home" data-active="true" title="总览 / 新建会话" aria-label="总览">
     <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
+    <span class="tb-lbl">总览</span>
   </button>
   <!-- 只有会话 Tab 装在这条可横滚、两端渐隐的 strip 里；Home / + 在它外面，不吃那层遮罩。 -->
   <nav id="tabstrip" aria-label="会话标签"><div id="tablist"></div></nav>
   <button id="tab-new" title="新建会话（跳到总览并展开新建表单）" aria-label="新建会话">
     <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><line x1="8" y1="3.2" x2="8" y2="12.8"/><line x1="3.2" y1="8" x2="12.8" y2="8"/></svg>
+    <span class="tb-lbl">新建会话</span>
   </button>
   <div class="tb-right">
+    <button id="tab-side" aria-pressed="false" title="标签栏放到左侧 / 顶部（切换）" aria-label="切换标签栏位置">
+      <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.8" y="2.5" width="12.4" height="11" rx="2"/><line x1="6" y1="2.5" x2="6" y2="13.5"/></svg>
+    </button>
     <span id="ver-pill" class="verpill" title="kore 版本（服务端 __version__，/api/kore/roster 带回）"></span>
   </div>
 </header>
@@ -1007,6 +1073,19 @@
       <!-- 添加机器：只读面板（GET /api/join），把「在另一台机器上执行什么」直接摆出来。 -->
       <div class="form" id="c-joinp"><div id="c-joinp-body">载入中…</div>
         <div class="k-btns"><button id="c-joinp-close">收起</button></div>
+      </div>
+      <!-- 备注名 / 图标：点 session 行或节点组头左边的小图标打开。存在服务端（/api/labels）。 -->
+      <div class="modal" id="c-lbl" role="dialog" aria-modal="true" aria-labelledby="c-lbl-title">
+        <div class="lbl-box">
+          <div class="lbl-h"><span id="c-lbl-prev"></span><b id="c-lbl-title">备注</b></div>
+          <div class="lbl-sub" id="c-lbl-sub"></div>
+          <label for="c-lbl-name">备注名（留空 = 用原名）</label>
+          <input id="c-lbl-name" maxlength="40" autocomplete="off">
+          <label>图标（「自动」= 按名字自动分配）</label>
+          <div class="lbl-grid" id="c-lbl-grid"></div>
+          <div class="k-btns"><button id="c-lbl-save" class="primary">保存</button>
+            <button id="c-lbl-reset">恢复默认</button><button id="c-lbl-cancel">取消</button></div>
+        </div>
       </div>
       <div class="form" id="c-form">
         <label for="c-f-node">节点</label><select id="c-f-node"></select>
@@ -1174,7 +1253,12 @@ function kToggleStar(s) {
    「星标 / 非星标」的两行相对次序不变 —— 不另加决胜键。roster 顺序本身稳定，星标集合也稳定，
    所以每次 roster 刷新重排得到的是同一个序，kSel 指的那一行不会无故跳。 */
 function kSortRows() {
-  kRows.sort((a, b) => (kStarSet.has(kStarId(b)) ? 1 : 0) - (kStarSet.has(kStarId(a)) ? 1 : 0));
+  // 按节点分组（本机在前），组内星标置顶。Array.sort 是稳定的，同组同星标保持服务端顺序。
+  kRows.sort((a, b) => {
+    const na = kNodeOrder(a.node_ip), nb = kNodeOrder(b.node_ip);
+    if (na !== nb) return na < nb ? -1 : 1;
+    return (kStarSet.has(kStarId(b)) ? 1 : 0) - (kStarSet.has(kStarId(a)) ? 1 : 0);
+  });
 }
 
 /* 列表行上的「杀」—— 页内两步确认，不靠 window.confirm。
@@ -1245,7 +1329,89 @@ function note(msg, bad) {
   setTimeout(() => { if (note.seq === mine) el.textContent = ''; }, bad ? 20000 : 5000);
 }
 
+/* ── 图标与备注名 ──────────────────────────────────────────────
+   每个 session / 节点一个 2 行高的 ASCII 小图标（和 kore 品牌 logo 同一种四分格方块字画法），
+   画的是水果和动物。没配置时按名字自动分配：FNV-1a 哈希 → 选图标、选浅色底，同一个名字在
+   任何设备上都得到同一个结果。备注名和手选的图标存在服务端（POST /api/labels，
+   ~/.kore/labels.json），电脑和手机看到的一样。 */
+const KORE_ICONS = {
+  cat: { fg: '#b45309', art: ["▙▄▄▄▟", "▚█▄█▞"] },
+  dog: { fg: '#8b5e34', art: ["█▟█▙█", "▘▚█▞▝"] },
+  rabbit: { fg: '#9d6b9e', art: [" ▌ ▐ ", "▝███▘"] },
+  bear: { fg: '#7c4a2d', art: ["█▄▄▄█", "▝▙█▟▘"] },
+  fox: { fg: '#d9480f', art: ["▙▄▄▄▟", "▝▘█▝▘"] },
+  owl: { fg: '#6d5a3a', art: ["▙▗▄▖▟", "▜█▀█▛"] },
+  fish: { fg: '#1971c2', art: ["▗▜██▄▘", "▀███▀▖"] },
+  frog: { fg: '#2b8a3e', art: ["▟▙▄▟▙", "▜▄▄▄▛"] },
+  pig: { fg: '#d6336c', art: ["█▄▄▄█", "▜▙█▟▛"] },
+  turtle: { fg: '#2f9e44', art: [" ▟█▙▗", "▐▀▀▀▛"] },
+  apple: { fg: '#e03131', art: ["▗▄▚▄ ", "▜█▜█▘"] },
+  cherry: { fg: '#c2255c', art: ["  ▖▚ ", "▐▌ ▐▌"] },
+  pear: { fg: '#74b816', art: [" ▗▙  ", " ██▌ "] },
+  grape: { fg: '#7048e8', art: ["▗▞▙▗▖", " ▀▞▘ "] },
+  melon: { fg: '#2f9e44', art: ["▛▛█▜▜", "▝▄▄▄▘"] },
+  berry: { fg: '#e8590c', art: ["▗▙█▟▖", " ▘█▝ "] },
+  lemon: { fg: '#e67700', art: ["▗███▖", "▀███▀"] },
+  orange: { fg: '#f76707', art: [" ▄▙▙ ", "▝███▘"] },
+};
+const KORE_ICON_IDS = Object.keys(KORE_ICONS);
+const KORE_ICON_BGS = ['#fdecec', '#fff3d6', '#e6f6e6', '#e3f0ff', '#efe6ff',
+                       '#ffe9db', '#dff6f5', '#fbe6f1', '#eef5dc', '#f1efe9'];
+function kHash(str) {           // FNV-1a 32 位
+  let h = 0x811c9dc5;
+  for (const c of String(str)) { h ^= c.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h >>> 0;
+}
+let kLabels = { nodes: {}, sessions: {} };
+// 图标：手选的优先，否则按 seed（session 名 / 节点主机名）自动分配。底色永远按 seed，
+// 这样手选图标之后颜色也不会变。
+function kIconFor(seed, chosen) {
+  const h = kHash(seed);
+  const id = (chosen && KORE_ICONS[chosen]) ? chosen : KORE_ICON_IDS[h % KORE_ICON_IDS.length];
+  return { id, bg: KORE_ICON_BGS[Math.floor(h / KORE_ICON_IDS.length) % KORE_ICON_BGS.length] };
+}
+function kIconHtml(icon, cls, attrs) {
+  const d = KORE_ICONS[icon.id];
+  return `<pre class="kicon ${cls || ''}" style="background:${icon.bg};color:${d.fg}" aria-hidden="true"${attrs || ''}>${esc(d.art.join('\n'))}</pre>`;
+}
+function kSessKey(s) { return s.node_ip + '/' + s.name; }
+function kSessLabel(s) { return kLabels.sessions[kSessKey(s)] || {}; }
+function kSessIcon(s) { return kIconFor(kStripPrefix(s.name), kSessLabel(s).icon); }
+function kSessName(s) { return kSessLabel(s).name || kStripPrefix(s.name); }
+function kNodeLbl(ip) { return kLabels.nodes[ip] || {}; }
+function kNodeIcon(ip) { const n = kNode(ip); return kIconFor(n.hostname || ip, kNodeLbl(ip).icon); }
+
+/* 节点信息：node_ip -> {hostname, self, color}。来自 roster 的 nodes（bridge.job_map 给每个
+   节点带了 hostname 和「是不是 server 本机」）。session 行只有 node_ip，靠这张表说清楚它
+   在哪台机器上。 */
+let kNodes = {};
+const K_NODE_SELF = '#d77757';   // 本机 = 品牌珊瑚色
+const K_NODE_COLORS = ['#0969da', '#8250df', '#1a7f37', '#bf3989', '#0e7c86', '#9a6700', '#cf222e'];
+function kNodeColor(ip, self) {
+  if (self) return K_NODE_SELF;
+  let h = 0;
+  for (const c of String(ip)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return K_NODE_COLORS[h % K_NODE_COLORS.length];
+}
+function kNode(ip) {
+  return kNodes[ip] || (kNodes[ip] = { ip, hostname: '', self: false, color: kNodeColor(ip, false) });
+}
+// 短名：本机 → 「本机」；其他 → 主机名的第一段；没有主机名就用 IP。
+function kNodeName(ip) {
+  const n = kNode(ip), host = (n.hostname || '').split('.')[0];
+  return kNodeLbl(ip).name || (n.self ? '本机' : (host || ip));
+}
+function kNodeOrder(ip) {   // 本机在前，其余按名字
+  const n = kNode(ip);
+  return (n.self ? '0' : '1') + (n.hostname || ip);
+}
+
 function renderK(r) {
+  kNodes = {};
+  for (const n of (r.nodes || []))
+    kNodes[n.node_ip] = { ip: n.node_ip, hostname: n.hostname || '', self: !!n.self,
+                          color: kNodeColor(n.node_ip, !!n.self) };
+  if (r.labels) kLabels = { nodes: r.labels.nodes || {}, sessions: r.labels.sessions || {} };
   kRows = r.sessions || [];
   kSortRows();   // 星标置顶（稳定排序，见 kSortRows）—— 在算 kSel/画表之前就把顺序定下来
   // ROUND7-FIX #2：这里原来还会 publishClusterFacts() 一次，把集群事实推给观察半边的
@@ -1311,11 +1477,11 @@ function renderK(r) {
   kPaintList();
   renderTabs();   // 名字/前缀可能变了，让 Tab 上的标签跟着刷新
   const sel = $('c-f-node');
-  const live = (r.nodes || []).map(n => n.node_ip);
+  const live = (r.nodes || []).map(n => n.node_ip + '=' + kNodeName(n.node_ip));
   if (sel.dataset.filled !== live.join(',')) {
     sel.dataset.filled = live.join(',');
     sel.innerHTML = (r.nodes || []).map(n =>
-      `<option value="${esc(n.node_ip)}">${esc(n.node_ip)}${n.job_name ? ' · ' + esc(n.job_name) : ''}${n.gpus ? ' · ' + n.gpus + 'GPU' : ''}</option>`).join('');
+      `<option value="${esc(n.node_ip)}">${esc(kNodeName(n.node_ip))} (${esc(n.node_ip)})${n.job_name ? ' · ' + esc(n.job_name) : ''}${n.gpus ? ' · ' + n.gpus + 'GPU' : ''}</option>`).join('');
   }
 }
 
@@ -1335,10 +1501,10 @@ function tabFindRow(key) {
 function renderTabs() {
   const list = $('tablist');
   if (list) list.innerHTML = openTabs.map(s => {
-    const key = tabKey(s), label = kStripPrefix(s.name);
-    const av = (label.slice(0, 1) || '·');
-    return `<div class="ktab" role="tab" data-key="${esc(key)}" data-active="${key === activeKey}" title="${esc(s.name)} @ ${esc(s.node_ip)}">
-      <span class="ktab-av" aria-hidden="true">${esc(av)}</span>
+    const key = tabKey(s), label = kSessName(s);
+    // 图标外圈是所在节点的颜色：一眼看出这个 Tab 在哪台机器上。
+    return `<div class="ktab" role="tab" data-key="${esc(key)}" data-active="${key === activeKey}" title="${esc(s.name)} @ ${esc(kNodeName(s.node_ip))} (${esc(s.node_ip)})" style="--nc:${kNode(s.node_ip).color}">
+      ${kIconHtml(kSessIcon(s), 'tab')}
       <span class="ktab-t">${esc(label)}</span>
       <button class="ktab-x" data-act="tabclose" data-key="${esc(key)}" title="关闭标签（不杀 session）" aria-label="关闭标签">×</button>
     </div>`;
@@ -1371,6 +1537,87 @@ function closeTab(key) {
 }
 $('tab-home').onclick = goHome;
 $('tab-new').onclick = () => { goHome(); $('c-form').classList.add('open'); $('c-f-name') && $('c-f-name').focus(); };
+
+/* 标签栏位置：顶部 / 左侧，右上角那颗按钮切换，记在 localStorage（只影响本浏览器）。
+   <body> 开头那段小脚本在首帧之前就把 class 加上了，这里只管切换。 */
+function kSetTabSide(left) {
+  document.documentElement.classList.toggle('tabs-left', left);
+  $('tab-side').setAttribute('aria-pressed', left ? 'true' : 'false');
+  $('tab-side').title = left ? '标签栏放回顶部' : '标签栏放到左侧';
+  try { localStorage.setItem('kore.tabs', left ? 'left' : 'top'); } catch (e) { /* 存不住就本次有效 */ }
+  if ($('c-pane-modal').classList.contains('open')) paneFitGeom(0);   // 终端盒子变了，重新贴合
+}
+kSetTabSide(document.documentElement.classList.contains('tabs-left'));
+$('tab-side').onclick = () => kSetTabSide(!document.documentElement.classList.contains('tabs-left'));
+
+/* 备注名 / 图标对话框。session 的 key = node_ip/name，节点的 key = node_ip；
+   自动图标的种子分别是 session 名（去前缀）和节点主机名。 */
+let kLbl = null;   // {kind, key, seed, chosen}
+function kLabelOpen(kind, x) {
+  if (kind === 'session') {
+    const lb = kSessLabel(x);
+    kLbl = { kind, key: kSessKey(x), seed: kStripPrefix(x.name), chosen: lb.icon || '' };
+    $('c-lbl-title').textContent = 'session 备注';
+    $('c-lbl-sub').textContent = `${x.name} · ${kNodeName(x.node_ip)} (${x.node_ip})`;
+    $('c-lbl-name').value = lb.name || '';
+    $('c-lbl-name').placeholder = kStripPrefix(x.name);
+  } else {
+    const n = kNode(x), lb = kNodeLbl(x);
+    kLbl = { kind, key: x, seed: n.hostname || x, chosen: lb.icon || '' };
+    $('c-lbl-title').textContent = '机器备注';
+    $('c-lbl-sub').textContent = `${n.hostname || '?'} (${x})${n.self ? ' · 本机 / server' : ' · client'}`;
+    $('c-lbl-name').value = lb.name || '';
+    $('c-lbl-name').placeholder = n.self ? '本机' : ((n.hostname || '').split('.')[0] || x);
+  }
+  kLabelPaint();
+  $('c-lbl').classList.add('open');
+  $('c-lbl-name').focus();
+}
+function kLabelPaint() {
+  const auto = kIconFor(kLbl.seed, '');
+  $('c-lbl-prev').innerHTML = kIconHtml(kIconFor(kLbl.seed, kLbl.chosen));
+  $('c-lbl-grid').innerHTML =
+    `<button data-icon="" class="${kLbl.chosen ? '' : 'on'}" title="按名字自动分配">${kIconHtml(auto)}自动</button>` +
+    KORE_ICON_IDS.map(id =>
+      `<button data-icon="${id}" class="${kLbl.chosen === id ? 'on' : ''}" title="${id}">` +
+      `${kIconHtml({ id, bg: auto.bg })}${id}</button>`).join('');
+}
+function kLabelClose() { $('c-lbl').classList.remove('open'); kLbl = null; }
+async function kLabelSave(name, icon) {
+  // 只写本看板自己的显示设置（~/.kore/labels.json），碰不到任何节点：Bearer 鉴权即可，不走
+  // kPost 那扇需要 confirm 的节点写门。
+  const r = await fetch('/api/labels', {
+    method: 'POST', cache: 'no-store',
+    headers: { 'Content-Type': 'application/json', ...(TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}) },
+    body: JSON.stringify({ kind: kLbl.kind, key: kLbl.key, name, icon }),
+  });
+  const d = await r.json().catch(() => ({ error: 'HTTP ' + r.status }));
+  if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  kLabels = { nodes: d.labels.nodes || {}, sessions: d.labels.sessions || {} };
+  kPaintList(); renderTabs();
+  if (paneTarget && $('c-pane-modal').classList.contains('open'))
+    $('c-pane-title').textContent = `${kSessName(paneTarget)} @ ${kNodeName(paneTarget.node_ip)}  (${paneTarget.name} · ${paneTarget.node_ip})`;
+}
+$('c-lbl-grid').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-icon]'); if (!b || !kLbl) return;
+  kLbl.chosen = b.dataset.icon; kLabelPaint();
+});
+$('c-lbl-save').onclick = async () => {
+  if (!kLbl) return;
+  try { await kLabelSave($('c-lbl-name').value.trim(), kLbl.chosen); kLabelClose(); }
+  catch (e) { note('保存备注失败：' + e.message, true); }
+};
+$('c-lbl-reset').onclick = async () => {
+  if (!kLbl) return;
+  try { await kLabelSave('', ''); kLabelClose(); }
+  catch (e) { note('恢复默认失败：' + e.message, true); }
+};
+$('c-lbl-cancel').onclick = kLabelClose;
+$('c-lbl').addEventListener('click', ev => { if (ev.target === $('c-lbl')) kLabelClose(); });
+$('c-lbl').addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') { ev.stopPropagation(); kLabelClose(); }
+  else if (ev.key === 'Enter' && ev.target === $('c-lbl-name')) { ev.preventDefault(); $('c-lbl-save').click(); }
+});
 $('tablist').addEventListener('click', ev => {
   const x = ev.target.closest('button[data-act="tabclose"]');
   if (x) { ev.stopPropagation(); closeTab(x.dataset.key); return; }
@@ -1434,12 +1681,31 @@ let kEmpty = '';      // 空列表时的说明，同理
 function kPaintList() {
   const box = $('c-list');
   if (kSel >= kRows.length) kSel = kRows.length - 1;   // roster 变短了，别指空
-  if (!kRows.length) {
+  // 组头：每台机器一个（本机标「server」，其他标「client」），带 IP 和 session 数。
+  const counts = {};
+  for (const s of kRows) counts[s.node_ip] = (counts[s.node_ip] || 0) + 1;
+  const head = ip => {
+    const n = kNode(ip), host = (n.hostname || '').split('.')[0];
+    const named = !!kNodeLbl(ip).name;
+    return `<div class="k-node" style="--nc:${n.color}" title="${esc(n.hostname || ip)} (${esc(ip)})">` +
+      `<button class="k-ibtn" data-act="label-node" data-ip="${esc(ip)}" title="改这台机器的备注名 / 图标">` +
+      `${kIconHtml(kNodeIcon(ip), 'sm')}</button>` +
+      `<span class="badge">${n.self ? 'server' : 'client'}</span>` +
+      `<b>${esc(kNodeName(ip))}</b>` +
+      `${(named || n.self) && host ? `<span>${esc(host)}</span>` : ''}<span class="ip">${esc(ip)}</span>` +
+      `<span class="cnt">${counts[ip] || 0} 个</span></div>`;
+  };
+  const idle = Object.keys(kNodes).filter(ip => !counts[ip]).sort((a, b) =>
+    kNodeOrder(a) < kNodeOrder(b) ? -1 : 1);
+  if (!kRows.length && !idle.length) {
     kSel = -1;
     box.innerHTML = kEmpty;
   } else {
+    let prev = null;
     box.innerHTML = kRows.map((s, i) => {
-      const meta = [s.node_ip, s.job_name, s.gpus ? s.gpus + ' GPU' : '', s.cwd].filter(Boolean).join(' · ');
+      const grp = s.node_ip !== prev ? head(s.node_ip) : '';
+      prev = s.node_ip;
+      const meta = [s.job_name, s.gpus ? s.gpus + ' GPU' : '', s.cwd].filter(Boolean).join(' · ');
       const lock = s.protected ? `<span class="k-tag lock" title="${esc(s.write_block)}">受保护</span>`
         : (!s.writable ? `<span class="k-tag lock" title="${esc(s.write_block)}">不可写</span>` : '');
       const starred = kStarSet.has(kStarId(s));
@@ -1447,17 +1713,16 @@ function kPaintList() {
       // 待命态按稳定 id 渲染（见 kKillClick）：roster 重排/重画都认得是哪一行，重画不丢待命。
       const armed = kKillArm === kStarId(s);
       const kill = `<button class="k-kill${armed ? ' arm' : ''}" data-act="kill" data-i="${i}" title="${armed ? '再点一次 = 真杀；3 秒不点自动撤销' : '杀掉这个 session（kill 整个 tmux session，未保存的对话就没了）'}" aria-label="${armed ? '确认杀' : '杀掉 session'}">${armed ? '确认杀' : '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>'}</button>`;
-      return `<div class="k-row ${s.protected ? 'protected' : ''}${i === kSel ? ' sel' : ''}" role="option" id="c-row-${i}" aria-selected="${i === kSel}" tabindex="-1">
-        <div class="k-h"><span class="dot ${esc(s.state)}"></span><pre class="k-logo" aria-hidden="true"> ▐▛███▜▌
-▝▜█████▛▘
-  ▘▘ ▝▝</pre>
-          <span class="k-n" title="${esc(s.name)}">${esc(s.name)}</span>
+      return grp + `<div class="k-row has-nc ${s.protected ? 'protected' : ''}${i === kSel ? ' sel' : ''}" style="--nc:${kNode(s.node_ip).color}" role="option" id="c-row-${i}" aria-selected="${i === kSel}" tabindex="-1">
+        <div class="k-h"><span class="dot ${esc(s.state)}"></span><button class="k-ibtn" data-act="label" data-i="${i}" title="改备注名 / 图标">${kIconHtml(kSessIcon(s))}</button>
+          <span class="k-n" title="${esc(s.name)}">${esc(kSessLabel(s).name || s.name)}${kSessLabel(s).name ? `<span class="k-real">${esc(s.name)}</span>` : ''}</span>
           ${lock}<span class="k-tag">${esc(s.state)}</span>${star}${kill}</div>
         ${meta ? `<div class="k-m">${esc(meta)}</div>` : ''}
         ${s.role ? `<div class="k-m">${esc(s.role)}</div>` : ''}
         ${s.summary ? `<div class="k-s">${esc(s.summary)}</div>` : ''}
       </div>`;
-    }).join('');
+    }).join('') + idle.map(ip => head(ip) +
+      `<div class="k-none">这台机器上还没有 ${esc(kPrefix)} 前缀的 session</div>`).join('');
   }
   if (kHint) box.insertAdjacentHTML('afterbegin', kHint);
   // 屏幕阅读器那一半：listbox 指向当前 option 的 id。没有高亮就是空串，不是 'c-row--1'。
@@ -2107,7 +2372,7 @@ function paneApplyTerm(f) {
 }
 async function openPane(s) {
   paneTarget = s;
-  $('c-pane-title').textContent = `${s.name} @ ${s.node_ip}`;
+  $('c-pane-title').textContent = `${kSessName(s)} @ ${kNodeName(s.node_ip)}  (${s.name} · ${s.node_ip})`;
   $('c-pane-modal').classList.add('open');
   panePageLock(true);
   // 上一个 pane 借过对面的几何就已经在它自己的关窗里还掉了，这里只把本次的账本清零。
@@ -2695,10 +2960,12 @@ $('c-list').addEventListener('click', async ev => {
   // 这类终端里本就能做的不挂。点钮的两条在 data-act 里分流，点行其它任意处 → 开终端。
   const b = ev.target.closest('button[data-act]');
   if (b) {
+    if (b.dataset.act === 'label-node') { kLabelOpen('node', b.dataset.ip); return; }
     const s = kRows[+b.dataset.i];
     if (!s) return;
     if (b.dataset.act === 'star') kToggleStar(s);
     else if (b.dataset.act === 'kill') kKillClick(s);
+    else if (b.dataset.act === 'label') kLabelOpen('session', s);
     return;
   }
   // 整行点击 → 开终端（pane 是全功能终端，直接打字/按 Esc）。和 Enter 键同一条只读路径。

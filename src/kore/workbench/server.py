@@ -128,6 +128,55 @@ KORE_AGENTS_FILE = os.path.expanduser(
 _IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
+# Display labels: a nickname and/or an icon per node (key = node_ip) and per session
+# (key = "<node_ip>/<session>"). Kept server-side so every device shows the same names.
+# Icons are drawn by the dashboard; here an icon is only an id ("cat", "apple", …).
+LABELS_FILE = os.path.join(
+    os.path.expanduser(os.environ.get("KORE_STATE_HOME") or "~/.kore"), "labels.json")
+_LABEL_KEY_RE = {
+    "node": re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$"),
+    "session": re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}/[A-Za-z0-9_-]{1,64}$"),
+}
+_LABEL_ICON_RE = re.compile(r"^[a-z]{1,16}$")
+_labels_mu = threading.Lock()
+
+
+def _labels_load() -> dict:
+    try:
+        with open(LABELS_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        d = {}
+    if not isinstance(d, dict):
+        d = {}
+    return {"nodes": d.get("nodes") if isinstance(d.get("nodes"), dict) else {},
+            "sessions": d.get("sessions") if isinstance(d.get("sessions"), dict) else {}}
+
+
+def _labels_set(kind: str, key: str, name: str, icon: str) -> dict:
+    """Set (or, with an empty name and icon, clear) one label. Returns all labels."""
+    if kind not in _LABEL_KEY_RE or not _LABEL_KEY_RE[kind].match(key):
+        raise ValueError("need kind node|session and a matching key")
+    name = name.strip()
+    if len(name) > 40 or any(ord(c) < 32 for c in name):
+        raise ValueError("name: at most 40 characters, no control characters")
+    if icon and not _LABEL_ICON_RE.match(icon):
+        raise ValueError("icon: a short lowercase id")
+    with _labels_mu:
+        labels = _labels_load()
+        table = labels["nodes" if kind == "node" else "sessions"]
+        if name or icon:
+            table[key] = {k: v for k, v in (("name", name), ("icon", icon)) if v}
+        else:
+            table.pop(key, None)
+        os.makedirs(os.path.dirname(LABELS_FILE) or ".", exist_ok=True)
+        tmp = f"{LABELS_FILE}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(labels, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, LABELS_FILE)
+    return labels
+
+
 # Server -> client reachability, probed when a client registers. Registration only proves
 # client -> server; the engine also needs server -> client (POST /exec, GET /tap on the
 # agent port), and that direction is the one a firewall usually blocks. Only SUCCESS is
@@ -608,7 +657,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             prefix = getattr(state_mod.bridge(), "TMUX_PREFIX", "kore-")
             self._json(200, {"ok": True, "policy": koreops.policy(),
                              "roster": roster, "streams": streams, "prefix": prefix,
-                             "version": KORE_VERSION})
+                             "version": KORE_VERSION, "labels": _labels_load()})
         elif path == "/api/kore/policy":
             self._json(200, {"ok": True, "policy": koreops.policy()})
         elif path == "/api/kore/roster":
@@ -616,6 +665,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if isinstance(r, dict):   # tell the UI the live prefix so it never hardcodes it
                 r.setdefault("prefix", getattr(state_mod.bridge(), "TMUX_PREFIX", "kore-"))
                 r.setdefault("version", KORE_VERSION)   # so the titlebar can show the build
+                # Labels change independently of the (cached) roster: a fresh copy each time.
+                r = {**r, "labels": _labels_load()}
             self._json(200, r)
         elif path in ("/api/kore/read", "/api/kore/status"):
             verb = path.rsplit("/", 1)[1]
@@ -1169,6 +1220,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                  "error": "unauthorized: writes require an "
                                           "Authorization: Bearer header, not ?token="})
                 return
+            if path == "/api/labels":
+                # Display labels (nickname + icon) for a node or a session. Cosmetic and
+                # local to this board: nothing reaches a node, so it needs the WB Bearer
+                # token but not koreops' gate or a `confirm`.
+                self._labels_endpoint(raw)
+                return
             verb = path.rsplit("/", 1)[1] if path.startswith("/api/kore/") else ""
             if verb not in koreops.WRITE_VERBS:
                 self._json(404, {"ok": False, "error": f"no write endpoint {path!r}"})
@@ -1249,6 +1306,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(403, {"ok": False, "refused": str(exc)})
         except Exception:  # noqa: BLE001
             self._fault()
+
+    def _labels_endpoint(self, raw: bytes) -> None:
+        """POST {kind: "node"|"session", key, name, icon}. Empty name AND icon = reset."""
+        try:
+            body = json.loads(raw.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._json(400, {"ok": False, "error": f"bad JSON body: {exc}"})
+            return
+        if not isinstance(body, dict):
+            self._json(400, {"ok": False, "error": "body must be a JSON object"})
+            return
+        try:
+            labels = _labels_set(str(body.get("kind") or ""), str(body.get("key") or ""),
+                                 str(body.get("name") or ""), str(body.get("icon") or ""))
+        except ValueError as exc:
+            self._json(400, {"ok": False, "error": str(exc)})
+            return
+        self._json(200, {"ok": True, "labels": labels})
 
     def _agents_register_endpoint(self, raw: bytes) -> None:
         """Client agent → server registry push: the one door a client joins through.

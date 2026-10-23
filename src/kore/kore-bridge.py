@@ -433,12 +433,22 @@ def job_map(force: bool = False) -> dict[str, dict[str, Any]]:
     with a fresh agent is writable. `alive: True` satisfies node_live's first test;
     without it every node would read as dead.
     """
+    import socket  # noqa: PLC0415
+
     out: dict[str, dict[str, Any]] = {}
+    self_ip = _local_node_ip()
+    reg = agents_load()
     for ip in agents_live():
         if not IP_RE.match(ip):
             continue
+        is_self = ip == self_ip
+        host = (socket.gethostname() if is_self
+                else str((reg.get(ip) or {}).get("hostname") or ""))
+        # `self` / `hostname` let the dashboard say WHICH machine a session lives on: the
+        # server's own host, or a client (by its hostname).
         out[ip] = {"job_name": "", "job_id": "", "user": "", "gpus": 0, "nnode": 0,
-                   "status": "", "alive": True, "cpus": 0}
+                   "status": "", "alive": True, "cpus": 0,
+                   "self": is_self, "hostname": host}
     return out
 
 
