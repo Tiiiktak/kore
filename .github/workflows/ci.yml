@@ -33,8 +33,22 @@ jobs:
       - name: Routing unit tests (self-local + http client, no network)
         run: python tests/test_transport.py
 
-      - name: Lint the service script
-        run: bash -n src/kore/workbench/service.sh
+      - name: Lint the service script and the installer
+        run: |
+          bash -n src/kore/workbench/service.sh
+          sh -n install.sh
+          sudo apt-get install -y dash >/dev/null 2>&1 || true
+          if command -v dash >/dev/null; then dash -n install.sh; fi
+
+      - name: Installer end-to-end (from this checkout, POSIX sh)
+        run: |
+          export HOME="$(mktemp -d)"
+          KORE_INSTALL_FROM="$PWD" KORE_VERSION=ci sh install.sh --no-modify-path
+          "$HOME/.local/bin/kore" --version
+          "$HOME/.local/bin/kore" --help >/dev/null
+          test -f "$HOME/.local/share/kore/current/.kore-install"
+          sh install.sh --uninstall
+          test ! -e "$HOME/.local/bin/kore"
 
       - name: Validate the write policy JSON
         run: python -c "import json; json.load(open('src/kore/dispatch-allowlist.json')); print('dispatch-allowlist.json ok')"

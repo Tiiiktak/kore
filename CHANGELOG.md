@@ -4,6 +4,22 @@ All notable changes to **kore** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-10-23
+
+### Added
+- **One-line install:** `curl -fsSL https://raw.githubusercontent.com/Tiiiktak/kore/main/install.sh | sh`.
+  Needs only Python ≥ 3.8 and curl/wget (kore is stdlib-only — no pip, no uv). Installs the
+  latest release under `~/.local/share/kore`, a `kore` launcher in `~/.local/bin`, and adds
+  that dir to PATH when needed. Options: `--version vX.Y.Z`, `--no-modify-path`,
+  `--uninstall`.
+- `kore upgrade` recognizes an install.sh install and upgrades it by re-running the
+  installer; it can find the latest release without git.
+
+### Changed
+- **Bare `kore` starts the server** (same as `kore server`) — install, then just run `kore`.
+- The server banner prints the install one-liner next to the join command, for machines
+  that don't have kore yet.
+
 ## [0.3.0] — 2026-10-23
 
 Initial public release. kore manages Claude Code sessions running in tmux across one or
@@ -50,4 +66,5 @@ more machines, from a web dashboard or as MCP tools, with an explicit server/cli
   `py_compile`, the routing tests, a packaging smoke that installs the wheel and asserts the
   data files ship) and a tag-triggered Release that builds the wheel + sdist.
 
+[0.3.1]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Tiiiktak/kore/releases/tag/v0.3.0

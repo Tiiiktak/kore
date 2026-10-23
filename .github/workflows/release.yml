@@ -44,5 +44,5 @@ jobs:
             gh release create "$GITHUB_REF_NAME" dist/* \
               --title "$GITHUB_REF_NAME" \
               --generate-notes \
-              --notes "Install: \`uvx --from git+https://github.com/${GITHUB_REPOSITORY}@${GITHUB_REF_NAME} kore serve\`"
+              --notes "Install: \`curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | sh -s -- --version ${GITHUB_REF_NAME}\` then run \`kore\`"
           fi

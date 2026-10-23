@@ -37,17 +37,29 @@ browser ─HTTP─▶ server.py ─▶ koreops.py ─▶ kore-bridge.py ─┬�
 
 ## Quickstart (one machine, zero config)
 
-Install once with [uv](https://docs.astral.sh/uv/), then run `kore server`. No config
-files, no token to copy — all runtime state lands under `~/.kore/`:
+Install with one line, then run `kore`. No config files, no token to copy — all runtime
+state lands under `~/.kore/`:
 
 ```bash
-uv tool install git+https://github.com/Tiiiktak/kore@v0.3.0   # puts `kore` on your PATH
-kore server                                                   # start + print a link
+curl -fsSL https://raw.githubusercontent.com/Tiiiktak/kore/main/install.sh | sh
+kore                                                   # start + print a link
 ```
 
-`kore server` mints the tokens it needs, starts the dashboard **in the background**, waits
-for it to come up, and prints a **ready-to-click link with the access token already in
-it** — one click, no login — plus the join command for adding more machines:
+kore is stdlib-only, so the installer needs nothing but **Python ≥ 3.8** and curl/wget —
+no pip, no uv, no virtualenv. It downloads the latest release into
+`~/.local/share/kore`, puts a `kore` launcher in `~/.local/bin`, and adds that dir to your
+PATH if needed (open a new shell afterwards). Installer options go after `sh -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Tiiiktak/kore/main/install.sh | sh -s -- --version v0.3.1
+curl -fsSL https://raw.githubusercontent.com/Tiiiktak/kore/main/install.sh | sh -s -- --no-modify-path
+curl -fsSL https://raw.githubusercontent.com/Tiiiktak/kore/main/install.sh | sh -s -- --uninstall
+```
+
+`kore` (same as `kore server`) mints the tokens it needs, starts the dashboard **in the
+background**, waits for it to come up, and prints a **ready-to-click link with the access
+token already in it** — one click, no login — plus the join command for adding more
+machines:
 
 ```
 kore server is up  —  pid 12345, prefix=kore-
@@ -61,24 +73,25 @@ kore server is up  —  pid 12345, prefix=kore-
 
       kore client --server <server-ip>:8198 --token <agent-token>
 
+      (kore not installed there yet?  curl -fsSL https://raw.githubusercontent.com/Tiiiktak/kore/main/install.sh | sh)
+
   logs:  ~/.kore/kore.log
   stop:  kore down
 ```
 
-`kore status` reprints the link; `kore down` stops it. Re-running `kore server` is
-idempotent; if you pass config that disagrees with a board that's already up it **warns**
-and tells you to `kore server --restart` (which tears the board down and brings it back
-with the new config) instead of silently ignoring the flags. Prefer not to install? Run it
-straight from git (`uvx`) or from a clone — stdlib only, no uv, no pip:
+`kore status` reprints the link; `kore down` stops it; `kore upgrade` updates in place.
+Re-running `kore` is idempotent; if you pass config that disagrees with a board that's
+already up it **warns** and tells you to `kore server --restart` (which tears the board
+down and brings it back with the new config) instead of silently ignoring the flags.
+
+Other ways to run it — all stdlib only:
 
 ```bash
-uvx --from git+https://github.com/Tiiiktak/kore@v0.3.0 kore server   # ephemeral, from git
-#                                                                     (for a long-lived
-#   daemon prefer `uv tool install` above so the venv isn't a throwaway cache entry)
+uv tool install git+https://github.com/Tiiiktak/kore@v0.3.1   # via uv instead of install.sh
 
 git clone https://github.com/Tiiiktak/kore && cd kore
 ./kore doctor        # preflight: tmux/claude on PATH, tokens, node-ip…
-./kore server        # same launcher, no install
+./kore               # same launcher, no install
 ```
 
 From the dashboard you can list sessions, create/kill a kore session, and open a live
@@ -86,10 +99,11 @@ xterm.js terminal into any pane (keystrokes, resize, scroll).
 
 ## Add another machine
 
-On the second machine (install kore there the same way), paste the join line the server
-printed:
+On the second machine, install kore with the same one-liner, then paste the join line the
+server printed:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Tiiiktak/kore/main/install.sh | sh
 kore client --server <server-ip>:8198 --token <agent-token>
 ```
 
@@ -109,11 +123,11 @@ and drive sessions on it exactly like the server's own node.
 
 | command | what it does |
 |---|---|
-| `kore server` (central node) | start the dashboard in the background, print a tokened link **and** the `kore client …` join command. Also a worker, so one machine needs nothing else. `kore server --restart` applies new config to a running board |
+| `kore` / `kore server` (central node) | start the dashboard in the background, print a tokened link **and** the `kore client …` join command. Also a worker, so one machine needs nothing else. `kore server --restart` applies new config to a running board |
 | `kore client --server <ip:port> --token <tok>` | join THIS machine as a worker node (paste the server's join line); no defaults |
 | `kore down` | stop the background dashboard |
 | `kore status` | is it up? reprint the link |
-| `kore upgrade` | update kore in place to the latest release — `--version vX.Y.Z` to pin, `--check` to only compare. Detects a git clone (fast-forwards it) vs a `uv tool` install (reinstalls from git). For a private repo set `KORE_GITHUB_TOKEN` |
+| `kore upgrade` | update kore in place to the latest release — `--version vX.Y.Z` to pin, `--check` to only compare. Handles an install.sh install (re-runs the installer), a git clone (fast-forwards it) and a `uv tool` install (reinstalls from git) |
 | `kore --version` | print the installed version |
 | `kore mcp` | run the MCP-over-stdio server (stdout = protocol JSON only) |
 | `kore ops …` | the write-door / engine CLI (`policy`, `alive`, `roster`, `read`, …) |
@@ -130,6 +144,7 @@ automatically, on whichever node it lives.
 
 ```
 kore/                            repo root
+├── install.sh                   one-line installer (`curl -fsSL … | sh`)
 ├── kore                         clone-and-run launcher (stdlib, no install)
 ├── pyproject.toml               packaging (hatchling; console-script `kore`)
 ├── tests/                       test_transport.py (self-local + http-client routing)
@@ -207,7 +222,7 @@ logs go to `stderr`). Example MCP client config:
   "mcpServers": {
     "kore": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/Tiiiktak/kore@v0.3.0", "kore", "mcp"],
+      "args": ["--from", "git+https://github.com/Tiiiktak/kore@v0.3.1", "kore", "mcp"],
       "env": { "KORE_AGENT_TOKEN": "<shared-secret>" }
     }
   }

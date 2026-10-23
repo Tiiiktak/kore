@@ -14,6 +14,7 @@ src/kore/            the package (shipped as a wheel)
   workbench/         the dashboard (server.py, index.html, vendor/xterm)
 tests/               test_transport.py (self-local + http-client routing)
 kore                 clone-and-run launcher (no install needed)
+install.sh           the one-line installer (POSIX sh; CI lints it with dash)
 ```
 
 The hyphenated / extension-less scripts (`kore-bridge.py`, `kore-agent.py`) are **run by

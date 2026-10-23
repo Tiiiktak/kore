@@ -1,6 +1,6 @@
 """kore CLI — one command over the self-contained entry scripts.
 
-    kore            (no args) print help
+    kore            (no args) same as `kore server` — the one-command start
     kore server     start kore as the central node: launch the dashboard in the
                     background, print a ready-to-click tokened link, AND print a
                     one-line join command to add more machines. The server is also a
@@ -56,6 +56,10 @@ except Exception:        # running in some odd layout; version is non-critical h
 
 # The GitHub repo `kore upgrade` pulls from. Overridable so a fork can self-update.
 REPO = os.environ.get("KORE_REPO", "Tiiiktak/kore")
+# The one-line installer (`curl -fsSL <this> | sh`). `kore upgrade` re-runs it for an
+# install that came from it.
+INSTALL_URL = os.environ.get(
+    "KORE_INSTALL_URL", f"https://raw.githubusercontent.com/{REPO}/main/install.sh")
 
 # _apply_env_defaults() strips these (intranet agents must not traverse a proxy), but
 # reaching GitHub for an upgrade usually MUST. Snapshot the user's real values at import
@@ -244,6 +248,7 @@ def _server_banner(pid: int, port: str, prefix: str, tok: str, *, already: bool)
         f"      {primary}\n      {local}\n\n"
         f"  add another machine — run this on it (needs network both ways):\n\n"
         f"      {_join_cmd(port, tok)}\n\n"
+        f"      (kore not installed there yet?  curl -fsSL {INSTALL_URL} | sh)\n\n"
         f"  logs:  {LOGFILE}\n  stop:  kore down\n\n")
 
 
@@ -422,7 +427,7 @@ def _status(_rest: list) -> int:
     port = cfg.get("port", os.environ.get("WB_PORT", "8198"))
     prefix = cfg.get("prefix", _env("BRIDGE_PREFIX"))
     if not pid:
-        sys.stdout.write("kore is NOT running.  Start it with:  kore server\n")
+        sys.stdout.write("kore is NOT running.  Start it with:  kore\n")
         return 1
     live = _health_ok(cfg.get("host", os.environ.get("WB_HOST", "127.0.0.1")), port)
     primary, local = _link(port)
@@ -592,9 +597,37 @@ def _latest_tag(tok: str) -> tuple:
     return sorted(tags, key=_vtuple)[-1], ""
 
 
+def _proxy_opener():
+    """A urllib opener that uses the user's ORIGINAL proxy (see _ORIG_PROXY), for upgrade's
+    own GitHub calls. An empty map means no proxy, which is right when none was set."""
+    import urllib.request  # noqa: PLC0415
+    pmap = {}
+    for scheme in ("http", "https"):
+        val = (_ORIG_PROXY.get(f"{scheme}_proxy") or _ORIG_PROXY.get(f"{scheme.upper()}_PROXY")
+               or _ORIG_PROXY.get("all_proxy") or _ORIG_PROXY.get("ALL_PROXY"))
+        if val:
+            pmap[scheme] = val
+    return urllib.request.build_opener(urllib.request.ProxyHandler(pmap))
+
+
+def _latest_tag_http() -> tuple:
+    """Latest release tag without git: github.com/<repo>/releases/latest redirects to
+    .../releases/tag/<tag>. ('', err) on failure. Public repos only."""
+    try:
+        with _proxy_opener().open(f"https://github.com/{REPO}/releases/latest",
+                                  timeout=30) as r:
+            tag = r.geturl().rstrip("/").rsplit("/", 1)[-1]
+    except Exception as e:  # noqa: BLE001 - reported to the user verbatim
+        return "", f"could not reach github.com ({type(e).__name__}: {e})"
+    return (tag, "") if _is_semver(tag) else ("", f"no release tag in {tag!r}")
+
+
 def _install_source() -> tuple:
-    """How this kore was installed: ('clone', repo_root) | ('uv-tool', '') | ('other', '')."""
-    root = os.path.dirname(os.path.dirname(PKG))     # .../src/kore -> .../ (clone root)
+    """How this kore was installed:
+    ('script', root) | ('clone', repo_root) | ('uv-tool', '') | ('other', '')."""
+    root = os.path.dirname(os.path.dirname(PKG))     # .../src/kore -> .../ (source root)
+    if os.path.isfile(os.path.join(root, ".kore-install")):
+        return "script", root                        # unpacked by install.sh
     if os.path.isdir(os.path.join(root, ".git")):
         return "clone", root
     if shutil.which("uv"):
@@ -607,6 +640,37 @@ def _install_source() -> tuple:
         except Exception:
             pass
     return "other", ""
+
+
+def _upgrade_script(root: str, ref: str) -> int:
+    """Upgrade an install.sh install by re-running the installer for `ref`, in place (same
+    install dir and bin dir, PATH left alone)."""
+    marker: dict = {}
+    try:
+        with open(os.path.join(root, ".kore-install"), encoding="utf-8") as f:
+            for line in f:
+                if "=" in line:
+                    k, v = line.strip().split("=", 1)
+                    marker[k] = v
+    except OSError:
+        pass
+    try:
+        with _proxy_opener().open(INSTALL_URL, timeout=30) as r:
+            script = r.read()
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"could not download the installer {INSTALL_URL}: {e}\n")
+        return 1
+    env = _net_env()
+    env["KORE_VERSION"] = ref
+    env["KORE_INSTALL_DIR"] = os.path.dirname(root)          # root is <install_dir>/current
+    if marker.get("bin_dir"):
+        env["KORE_BIN_DIR"] = marker["bin_dir"]
+    if marker.get("repo"):
+        env["KORE_REPO"] = marker["repo"]
+    env["KORE_PYTHON"] = sys.executable
+    sys.stdout.write(f"  $ curl -fsSL {INSTALL_URL} | sh -s -- --version {ref}\n\n")
+    return subprocess.run(["sh", "-s", "--", "--no-modify-path"], input=script,
+                          env=env).returncode
 
 
 def _upgrade_uvtool(ref: str, tok: str) -> int:
@@ -652,6 +716,9 @@ def _upgrade(rest: list) -> int:
     ref, latest = args.ref, ""
     if not ref:
         latest, err = _latest_tag(tok)
+        if not latest:                     # no git (typical for an install.sh install)?
+            latest, err2 = _latest_tag_http()
+            err = err if latest else f"{err}; {err2}"
         if not latest:
             sys.stderr.write(
                 f"could not determine the latest release tag: {err}.\n"
@@ -678,20 +745,24 @@ def _upgrade(rest: list) -> int:
 
     if kind == "other":
         sys.stdout.write(
-            "\nkore wasn't installed via `uv tool` or a git clone, so I can't update it "
-            "in place.\n  reinstall with:\n"
-            f"    uv tool install --reinstall 'git+https://github.com/{REPO}.git@{ref}'\n\n")
+            "\nkore wasn't installed via install.sh, `uv tool` or a git clone, so I can't "
+            "update it in place.\n  reinstall with:\n"
+            f"    curl -fsSL {INSTALL_URL} | sh\n\n")
         return 1
 
     sys.stdout.write("\n")
-    rc = (_upgrade_clone(root, ref, bool(args.ref)) if kind == "clone"
-          else _upgrade_uvtool(ref, tok))
+    if kind == "script":
+        rc = _upgrade_script(root, ref)
+    elif kind == "clone":
+        rc = _upgrade_clone(root, ref, bool(args.ref))
+    else:
+        rc = _upgrade_uvtool(ref, tok)
     if rc != 0:
         sys.stderr.write("\nupgrade failed (see output above).\n")
         return 1
     sys.stdout.write(
         "\n✓ upgraded. A running board still runs the OLD code — apply the new one with:\n"
-        "    kore down && kore server\n\n")
+        "    kore down && kore\n\n")
     return 0
 
 
@@ -712,9 +783,9 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="kore",
         description="Manage kore sessions (Claude Code in tmux) from a web dashboard or as "
-                    "MCP tools. Start the central node with `kore server`; add machines by "
-                    "pasting the `kore client …` line it prints. Put identity flags BEFORE "
-                    "the subcommand, e.g. `kore --agent-token $TOK server`. "
+                    "MCP tools. Just run `kore` (= `kore server`) to start the central node; "
+                    "add machines by pasting the `kore client …` line it prints. Put identity "
+                    "flags BEFORE the subcommand, e.g. `kore --agent-token $TOK server`. "
                     "Subcommands: server client down status upgrade mcp ops doctor.")
     p.add_argument("-V", "--version", action="version", version=f"kore {_VERSION}")
     for flag, _suffix, helptext in _IDENTITY:
@@ -729,11 +800,9 @@ def main(argv=None) -> int:
         if val is not None:
             _set_env(suffix, val)
 
-    # Bare `kore` (no subcommand) prints help. `-h` is handled above by argparse.
-    if command is None:
-        p.print_help()
-        return 0
-    if command == "server":
+    # Bare `kore` (no subcommand) is the one-command start: same as `kore server`. `-h` is
+    # handled above by argparse, so `kore --help` still prints help instead of starting.
+    if command is None or command == "server":
         return _server(rest)
     if command == "client":
         return _client(rest)
