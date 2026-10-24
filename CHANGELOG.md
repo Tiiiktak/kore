@@ -6,6 +6,8 @@ All notable changes to **kore** are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-25
+
 ### Added
 - **New dashboard frontend.** The hand-written single-file board was rebuilt as a
   React + TypeScript + Tailwind + shadcn/ui app, still served as one self-contained
@@ -35,7 +37,8 @@ All notable changes to **kore** are documented here. The format follows
 - Session icons are the Claude Code logo in white (drawn as exact SVG pixels, truly
   centered) on a colored tile picked from the session name; machines have no icon, and their
   nickname is edited by clicking the machine name. The custom fruit/animal icon set is gone.
-- The tab-bar toggle sits right of the logo; both stay put when the layout switches.
+- The brand mark (top-left) and the browser favicon are one vector SVG — square, crisp,
+  theme-aware (`--claude`); the tab-side toggle sits to the right of the "kore" wordmark.
 - No element is outlined on just one side (separators became spacing or tinted blocks) —
   an owner design rule the new frontend carries forward.
 
