@@ -31,11 +31,37 @@ export function Chrome({ version, orientation }: { version?: string; orientation
         left ? 'w-[228px] flex-col gap-1 border-r p-2' : 'h-[46px] items-center gap-2 border-b px-2',
       )}
     >
-      {/* leading: brand mark flush-left, then the layout toggle (desktop), then the wordmark */}
+      {/* leading: brand mark flush-left, then the wordmark, then the layout toggle (desktop) */}
       <div className={cn('flex items-center gap-1.5', left && 'pb-0.5')}>
-        <span className="font-mono text-[9px] leading-[0.8] whitespace-pre text-[var(--claude)] select-none">
-          {' ▐▛▜▌\n▝▜▛▘'}
-        </span>
+        {/* brand mark: the ▐▛▜▌/▝▜▛▘ quadrant glyphs as vector sub-pixels (square, crisp,
+            theme-aware via currentColor) — same shape as the favicon. */}
+        <svg
+          viewBox="0 0 8 8"
+          className="size-[18px] shrink-0 text-[var(--claude)] select-none"
+          fill="currentColor"
+          shapeRendering="crispEdges"
+          aria-hidden="true"
+        >
+          <rect x="2" y="0" width="1" height="2" />
+          <rect x="3" y="0" width="1" height="2" />
+          <rect x="4" y="0" width="1" height="2" />
+          <rect x="5" y="0" width="1" height="2" />
+          <rect x="6" y="0" width="1" height="2" />
+          <rect x="7" y="0" width="1" height="2" />
+          <rect x="2" y="2" width="1" height="2" />
+          <rect x="3" y="2" width="1" height="2" />
+          <rect x="6" y="2" width="1" height="2" />
+          <rect x="7" y="2" width="1" height="2" />
+          <rect x="0" y="4" width="1" height="2" />
+          <rect x="1" y="4" width="1" height="2" />
+          <rect x="2" y="4" width="1" height="2" />
+          <rect x="3" y="4" width="1" height="2" />
+          <rect x="4" y="4" width="1" height="2" />
+          <rect x="5" y="4" width="1" height="2" />
+          <rect x="2" y="6" width="1" height="2" />
+          <rect x="3" y="6" width="1" height="2" />
+        </svg>
+        {!mobile && <span className="text-[15px] font-semibold tracking-tight">kore</span>}
         {!mobile && (
           <button
             onClick={toggleTabSide}
@@ -46,7 +72,6 @@ export function Chrome({ version, orientation }: { version?: string; orientation
             <PanelLeft className="size-[18px]" />
           </button>
         )}
-        {!mobile && <span className="text-[15px] font-semibold tracking-tight">kore</span>}
       </div>
 
       {/* overview / home */}
