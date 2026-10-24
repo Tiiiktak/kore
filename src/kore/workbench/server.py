@@ -13,12 +13,16 @@ Endpoints:
   GET  /api/kore/read         capture one pane
   GET  /api/kore/stream       the same capture as a live SSE feed (diff frames, ~1s)
   GET  /api/kore/bytes        the same pane as a BYTE stream (tmux control mode, no tick)
+  GET  /ws                    one read-only WebSocket multiplexing every pane's byte stream
+                              (each frame tagged by a client-chosen stream id)
   GET  /api/kore/streams      how many SSE feeds are open right now, and the cap
   GET  /api/kore/status       tmux/claude liveness for one session
   GET  /api/kore/jobs         recent write jobs
   GET  /api/kore/job?id=      one write job
   GET  /api/agents          the HTTP-agent registry the bridge routes to (TTL-pruned)
-  POST /api/kore/{start,stop,send,keys,input,resize}   drive a kore session; returns a job id
+  GET  /api/kore/unmanaged    tmux sessions on a node that do not carry the prefix yet
+  GET  /api/kore/fs/{roots,list,read}   read-only file browser (roots = session cwds + $HOME)
+  POST /api/kore/{start,stop,send,keys,input,resize,adopt}   drive a kore session; returns a job id
   POST /api/agents/register an agent pushes its {node_ip,agent_url,sessions}; fenced by
                             KORE_AGENT_TOKEN (a different trust domain from the WB token)
 
@@ -52,6 +56,7 @@ forbids. It is allowed for three reasons, and all three are load-bearing:
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import gzip
 import hashlib
@@ -66,6 +71,7 @@ import secrets
 import select
 import socket
 import socketserver
+import struct
 import subprocess
 import sys
 import threading
@@ -88,6 +94,60 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOKEN_FILE = os.environ.get("WB_TOKEN_FILE", os.path.join(HERE, ".token"))
 KORE_OPS_PATH = os.environ.get("KORE_OPS_PATH", os.path.join(os.path.dirname(HERE), "koreops.py"))
 MAX_BODY = 128 * 1024
+WVIEW_MAX = 12 * 1024 * 1024   # browser-window reverse proxy: cap one fetched response
+WVIEW_TTL = 12 * 3600          # a wview ticket's lifetime (seconds)
+# The dashboard page itself: only kore may frame it (a proxied page must never frame the
+# board to click-jack it), and the ?token= in its URL must never ride out in a Referer.
+PAGE_HEADERS = {"Content-Security-Policy": "frame-ancestors 'self'",
+                "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
+# Every proxied response. `sandbox` WITHOUT allow-same-origin makes the proxied document an
+# opaque origin even though it is served from kore's host:port — so it can never read the
+# dashboard's localStorage / window.TOKEN or call /api/kore/* as the board (2026-10-24 audit
+# P0-1: same-origin + allow-scripts + allow-same-origin was a full board takeover).
+WVIEW_HEADERS = {
+    "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups "
+                               "allow-popups-to-escape-sandbox allow-modals allow-downloads",
+    "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff",
+    # the opaque-origin page's own fetch()es back through the proxy are cross-origin now;
+    # no credentials ride on them (the ticket is in the path), so `*` grants nothing new.
+    "Access-Control-Allow-Origin": "*"}
+
+
+def _wview_ticket(exp: int | None = None) -> str:
+    """A wview-ONLY credential: proves "the board issued this" and expires. A proxied page
+    can read its own URL, so the ticket must not be the board token (which drives panes)."""
+    exp = int(exp or time.time() + WVIEW_TTL)
+    mac = hmac.new(TOKEN.encode(), f"wview|{exp}".encode(), hashlib.sha256).hexdigest()[:32]
+    return f"wv1.{exp}.{mac}"
+
+
+def _wview_ticket_ok(t: str) -> bool:
+    try:
+        ver, exp, _ = t.split(".", 2)
+        return ver == "wv1" and int(exp) > time.time() and hmac.compare_digest(t, _wview_ticket(int(exp)))
+    except (ValueError, TypeError):
+        return False
+
+
+def _wview_host_ok(host: str) -> str:
+    """'' when the proxy may connect to `host`, else the refusal reason. Resolves first and
+    judges every address (decimal / v4-mapped / DNS names all land here as real IPs), so
+    string tricks can't reach the cloud metadata service. Intranet and loopback stay
+    allowed on purpose: previewing the user's own dev servers is the feature."""
+    import ipaddress  # noqa: PLC0415
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as e:
+        return f"dns: {e}"
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%", 1)[0])
+        except ValueError:
+            return "bad address"
+        ip = getattr(ip, "ipv4_mapped", None) or ip
+        if ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved:
+            return f"blocked address {ip}"
+    return ""
 
 # Installed version, surfaced to the dashboard via /api/state so the titlebar can show it.
 # Read from the package's __init__.py BY PATH: this file runs as a script, so the `kore`
@@ -126,6 +186,7 @@ INSTALL_URL = os.environ.get(
 KORE_AGENTS_FILE = os.path.expanduser(
     os.environ.get("KORE_AGENTS_FILE", "~/.kore/agents.json"))
 _IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+_WS_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")   # tmux session name on a ws subscription
 
 
 # Display labels: a nickname and/or an icon per node (key = node_ip) and per session
@@ -282,6 +343,87 @@ STREAM_PING_S = 15.0         # comment frame so dead connections surface
 STREAM_WRITE_TIMEOUT_S = float(os.environ.get("WB_STREAM_WRITE_TIMEOUT", "30.0"))
 _stream_mu = threading.Lock()
 _streams_open = 0
+
+
+# ============================================================ WebSocket (RFC 6455)
+#
+# One multiplexed, READ-ONLY output transport for the dashboard. A browser showing N
+# terminals at once would otherwise hold N SSE connections, and HTTP/1.1 caps a browser at
+# ~6 connections per origin — the 6th tile would starve keystroke POSTs and the page would
+# appear to freeze (the server's own WB_MAX_STREAMS cap never even comes into play). One
+# WebSocket carries every terminal's byte stream, each frame tagged with a client-chosen
+# stream id, so any number of tiles costs ONE connection.
+#
+# It is READ-ONLY by construction: the only thing a client can ask for is a subscription,
+# which spawns a `koreops.py tap` child (`tmux -C attach -r`) — the same read door as
+# /api/kore/bytes. Keystrokes, resize and adopt still go through the gated POST path
+# (Bearer header + confirm + koreops._validate + audit); nothing on the socket can reach a
+# far side. Auth is the WB token in the query string, exactly as on the SSE read feeds (and
+# checked in do_GET BEFORE the upgrade). stdlib only: the handshake and framing are
+# implemented here rather than adding a dependency.
+
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+WS_MAX_MSG = 1 << 20            # 1 MiB cap on one inbound client message (control JSON is tiny)
+# data opcodes: 0x0 continuation, 0x1 text, 0x2 binary; control: 0x8 close, 0x9 ping, 0xA pong
+_WS_PING_S = 15.0
+
+
+def _ws_accept(key: str) -> str:
+    """The Sec-WebSocket-Accept value for a client's Sec-WebSocket-Key (RFC 6455 §4.2.2)."""
+    return base64.b64encode(hashlib.sha1((key + _WS_GUID).encode()).digest()).decode()
+
+
+def _ws_build(opcode: int, payload: bytes) -> bytes:
+    """One unfragmented server→client frame (never masked, FIN set)."""
+    n = len(payload)
+    if n < 126:
+        head = bytes((0x80 | opcode, n))
+    elif n < (1 << 16):
+        head = bytes((0x80 | opcode, 126)) + n.to_bytes(2, "big")
+    else:
+        head = bytes((0x80 | opcode, 127)) + n.to_bytes(8, "big")
+    return head + payload
+
+
+def _ws_read_frame(rfile):
+    """Read one RFC 6455 frame from a client. Returns (fin, opcode, payload: bytes), or
+    None at EOF / on any protocol violation (the caller then closes).
+
+    Client→server frames MUST be masked (§5.1); an unmasked frame, an over-long frame, or a
+    short read all return None rather than risk desyncing the frame stream."""
+    h = rfile.read(2)
+    if len(h) < 2:
+        return None
+    b0, b1 = h[0], h[1]
+    if b0 & 0x70:                               # RSV1-3 set, no extension negotiated (§5.2)
+        return None
+    opcode = b0 & 0x0f
+    masked = bool(b1 & 0x80)
+    ln = b1 & 0x7f
+    if not masked:                              # clients must mask; refuse if they don't
+        return None
+    if opcode >= 0x8 and (not (b0 & 0x80) or ln > 125):
+        return None                             # control frames must be FIN=1 and <=125B (§5.5)
+    if ln == 126:
+        ext = rfile.read(2)
+        if len(ext) < 2:
+            return None
+        ln = int.from_bytes(ext, "big")
+    elif ln == 127:
+        ext = rfile.read(8)
+        if len(ext) < 8:
+            return None
+        ln = int.from_bytes(ext, "big")
+    if ln > WS_MAX_MSG:
+        return None
+    mask = rfile.read(4)
+    if len(mask) < 4:
+        return None
+    data = rfile.read(ln) if ln else b""
+    if len(data) < ln:
+        return None
+    unmasked = bytes(data[i] ^ mask[i & 3] for i in range(ln))
+    return (bool(b0 & 0x80), opcode, unmasked)
 
 # ROUND8: the vendored xterm.js, served from an EXACT-FILENAME map.
 #
@@ -572,7 +714,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
 
     def _send(self, code: int, body: bytes, ctype: str, cache: str = "no-store",
-              etag: str = "", gz: bytes = b"") -> None:
+              etag: str = "", gz: bytes = b"", headers: dict | None = None) -> None:
         # 2026-10-12: 加了 gzip 协商。页面 166KB、xterm.js 289KB，原来全是不压缩明文。
         # gz 参数给静态文件走预压好的那份（每个文件版本只压一次）；动态 JSON 现压，
         # level 5 是 CPU 和体积的折中。
@@ -594,6 +736,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", cache)
         if etag:
             self.send_header("ETag", etag)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         # 2026-10-12: when we've decided to drop the socket (e.g. an over-cap
         # body left unread bytes behind), say so. Without this a keep-alive
         # client assumes reuse and desyncs on its next request against a socket
@@ -610,6 +754,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(404, b'{"error":"not found"}', "application/json")
             return
         body, gz, etag = got
+        hdrs = PAGE_HEADERS if ctype.startswith("text/html") else None
         if etag and etag in (self.headers.get("If-None-Match") or ""):
             # 304 不带 body，也就不需要 Content-Length/Content-Encoding。
             self.send_response(304)
@@ -617,7 +762,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Cache-Control", cache)
             self.end_headers()
             return
-        self._send(200, body, ctype, cache=cache, etag=etag, gz=gz)
+        self._send(200, body, ctype, cache=cache, etag=etag, gz=gz, headers=hdrs)
 
     def _json(self, code: int, obj) -> None:
         self._send(code, json.dumps(obj, ensure_ascii=False).encode(),
@@ -658,6 +803,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "policy": koreops.policy(),
                              "roster": roster, "streams": streams, "prefix": prefix,
                              "version": KORE_VERSION, "labels": _labels_load()})
+        elif path == "/api/kore/wview-ticket":
+            # The browser window's proxy credential (wview-only, expiring). Read-gated like
+            # every GET; see _wview_ticket for why it is not the board token.
+            t = _wview_ticket()
+            self._json(200, {"ok": True, "ticket": t, "exp": int(t.split(".")[1])})
         elif path == "/api/kore/policy":
             self._json(200, {"ok": True, "policy": koreops.policy()})
         elif path == "/api/kore/roster":
@@ -668,6 +818,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Labels change independently of the (cached) roster: a fresh copy each time.
                 r = {**r, "labels": _labels_load()}
             self._json(200, r)
+        elif path == "/api/kore/unmanaged":
+            # tmux sessions on one node WITHOUT the prefix — the "add an existing session"
+            # picker. Read-only; adopting one is the `adopt` write (POST /api/kore/adopt).
+            try:
+                self._json(200, koreops.unmanaged(one("node_ip")))
+            except koreops.KoreOpsError as exc:
+                self._json(403, {"ok": False, "refused": str(exc)})
+        elif path in ("/api/kore/fs/roots", "/api/kore/fs/list", "/api/kore/fs/read",
+                      "/api/kore/fs/readb"):
+            # File-browser window, READ side. All path policy is enforced on the node by
+            # koreops' fixed script. Policy refusals -> KoreOpsError -> 403; not-found /
+            # not-a-dir / permission -> 200 {"ok": false, "error"}. `readb` is the byte-range
+            # read (image preview + download); the browser loops on offset to pull any size.
+            op = path.rsplit("/", 1)[1]
+            try:
+                if op == "roots":
+                    r = koreops.fs_roots(one("node_ip"))
+                elif op == "list":
+                    r = koreops.fs_list(one("node_ip"), one("path"), hidden=one("hidden") == "1")
+                elif op == "readb":
+                    r = koreops.fs_readb(one("node_ip"), one("path"),
+                                         offset=_qint(one("offset"), 0, 0, 1 << 40),
+                                         length=_qint(one("len"), 0, 0, 1_048_576))
+                else:
+                    tail = one("tail")
+                    r = koreops.fs_read(one("node_ip"), one("path"),
+                                        tail=_qint(tail, 0, 0, 1_000_000) if tail != "" else None)
+                self._json(200, r)
+            except koreops.KoreOpsError as exc:
+                self._json(403, {"ok": False, "refused": str(exc)})
         elif path in ("/api/kore/read", "/api/kore/status"):
             verb = path.rsplit("/", 1)[1]
             kw = {"lines": _qint(one("lines"), 120, 1, 5000),
@@ -1157,6 +1337,348 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    # ------------------------------------------------------- WebSocket multiplex
+    def _ws_serve(self) -> None:
+        """GET /ws — the one read-only output transport (see the WebSocket section).
+
+        The WB token was already checked in do_GET (read auth, `?token=` allowed). This
+        does the RFC 6455 handshake, then runs the control loop in THIS thread: a client
+        sends JSON `{t:'sub',id,node_ip,name}` / `{t:'unsub',id}`; each live subscription
+        is a tap child whose bytes are relayed as id-tagged frames by its own thread."""
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if self.headers.get("Upgrade", "").lower() != "websocket" or not key:
+            self._send(400, b'{"error":"expected a websocket upgrade"}', "application/json")
+            return
+        self.close_connection = True
+        sock = self.connection
+        # A SEND-only deadline (not settimeout(), which would also fire on the control
+        # loop's idle reads and corrupt framing): a client that stops reading fills its
+        # receive window, and without this every sendall below — relay, pinger, control —
+        # would block forever holding wlock, leaking the tap child, its threads and the
+        # _streams_open slot. SO_SNDTIMEO makes sendall raise OSError (EAGAIN) instead, so
+        # ws_send trips `shutdown` and every sub tears down. Reads stay blocking (gettimeout
+        # is untouched), so an idle-but-healthy client is never dropped.
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO,
+                            struct.pack("ll", int(STREAM_WRITE_TIMEOUT_S), 0))
+        except OSError:
+            pass
+        try:
+            sock.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
+                         b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                         b"Sec-WebSocket-Accept: " + _ws_accept(key).encode() + b"\r\n\r\n")
+        except OSError:
+            return
+
+        shutdown = threading.Event()
+        wlock = threading.Lock()
+        subs: dict = {}                     # id -> {"child", "stop"}; guarded by subs_mu
+        subs_mu = threading.Lock()
+
+        def ws_send(opcode: int, payload: bytes) -> bool:
+            with wlock:
+                try:
+                    sock.sendall(_ws_build(opcode, payload))
+                    return True
+                except OSError:
+                    shutdown.set()
+                    return False
+
+        def send_json(obj) -> bool:
+            return ws_send(0x1, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+        def start_sub(sid, node_ip, name) -> None:
+            global _streams_open
+            if (not isinstance(sid, str) or not sid or not _IP_RE.match(str(node_ip))
+                    or not _WS_NAME_RE.match(str(name))):
+                send_json({"t": "err", "id": sid, "error": "bad subscription"})
+                return
+            cap = min(MAX_STREAMS, int(koreops.policy().get("tap_max_streams", 8) or 8))
+            # Decide and reserve UNDER the locks; send and spawn OUTSIDE them. send_json is a
+            # blocking socket write — doing it while holding the process-global _stream_mu
+            # (or subs_mu) would let one wedged client pin stream accounting board-wide.
+            over = dup = False
+            stop = None
+            with subs_mu:
+                if sid in subs:
+                    dup = True
+                else:
+                    with _stream_mu:
+                        if _streams_open >= cap:
+                            over = True
+                        else:
+                            _streams_open += 1          # the sub thread releases it
+                    if not over:
+                        stop = threading.Event()
+                        subs[sid] = {"child": None, "stop": stop}
+            if dup:
+                return
+            if over:
+                send_json({"t": "err", "id": sid,
+                           "error": f"too many open pane feeds ({cap})"})
+                return
+            try:
+                threading.Thread(target=self._ws_sub,
+                                 args=(sid, node_ip, name, stop, subs, subs_mu, send_json),
+                                 daemon=True, name=f"wb-ws-{sid[:24]}").start()
+            except RuntimeError:
+                # The thread never started, so its releasing finally never runs — roll back
+                # the reservation here or the slot and subs entry leak permanently.
+                with subs_mu:
+                    subs.pop(sid, None)
+                with _stream_mu:
+                    _streams_open -= 1
+                send_json({"t": "err", "id": sid, "error": "cannot start pane feed"})
+
+        def stop_sub(sid) -> None:
+            with subs_mu:
+                s = subs.get(sid)
+            if s:
+                s["stop"].set()                 # the sub thread tears down + releases
+
+        def pinger() -> None:
+            while not shutdown.wait(_WS_PING_S):
+                if not ws_send(0x9, b""):        # ping; a dead socket trips teardown
+                    break
+            try:
+                sock.close()                     # unblock the reader if it is still parked
+            except OSError:
+                pass
+
+        threading.Thread(target=pinger, daemon=True, name="wb-ws-ping").start()
+
+        # Control loop (this thread). Assemble fragments; handle control frames inline.
+        msg_op, msg_buf = 0, bytearray()
+        try:
+            while not shutdown.is_set():
+                fr = _ws_read_frame(self.rfile)
+                if fr is None:
+                    break
+                fin, opcode, payload = fr
+                if opcode == 0x8:                # close
+                    break
+                if opcode == 0x9:                # ping -> pong
+                    ws_send(0xA, payload)
+                    continue
+                if opcode == 0xA:                # pong
+                    continue
+                if opcode in (0x1, 0x2):         # start of a data message
+                    if msg_op:
+                        break                    # a new data frame while a fragment is open
+                    msg_op, msg_buf = opcode, bytearray(payload)
+                elif opcode == 0x0:              # continuation
+                    if not msg_op:
+                        break                    # continuation with no start frame
+                    msg_buf += payload
+                else:
+                    break                        # reserved opcode
+                if len(msg_buf) > WS_MAX_MSG:
+                    break
+                if not fin:
+                    continue
+                if msg_op == 0x1:                # a complete text message = one control msg
+                    try:
+                        m = json.loads(bytes(msg_buf).decode("utf-8"))
+                    except (UnicodeDecodeError, ValueError):
+                        m = None
+                    if isinstance(m, dict):
+                        if m.get("t") == "sub":
+                            start_sub(m.get("id"), m.get("node_ip"), m.get("name"))
+                        elif m.get("t") == "unsub":
+                            stop_sub(m.get("id"))
+                msg_op, msg_buf = 0, bytearray()   # message complete; reset the assembler
+        except OSError:
+            pass
+        finally:
+            shutdown.set()
+            with subs_mu:
+                live = list(subs.values())
+            for s in live:
+                s["stop"].set()
+            # Give the sub threads a moment to kill their children + release counters.
+            for _ in range(120):
+                with subs_mu:
+                    if not subs:
+                        break
+                time.sleep(0.1)
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _ws_kill_child(self, child) -> None:
+        if child is None:
+            return
+        try:
+            child.terminate()
+            child.wait(timeout=12)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                child.kill()
+            except OSError:
+                pass
+
+    def _ws_sub(self, sid, node_ip, name, stop, subs, subs_mu, send_json) -> None:
+        """One subscription: prime, attach a tap child, relay its bytes as id-tagged frames
+        until the client unsubscribes, the socket dies, or the tap ends. Owns the stream
+        counter release and the child teardown for this sub — exactly once, here."""
+        global _streams_open
+        child = None
+        try:
+            r = None
+            try:
+                r = koreops.read_verb("read", node_ip, name, who=self._who(),
+                                      lines=400, ansi=True, screen=True)
+            except Exception:                    # noqa: BLE001 - prime is best-effort
+                r = None
+            if r and r.get("ok"):
+                send_json({"t": "prime", "id": sid, "text": r.get("output") or "",
+                           "cols": r.get("cols"), "rows": r.get("rows"),
+                           "state": r.get("state"), "cx": r.get("cursor_x"),
+                           "cy": r.get("cursor_y")})
+            if stop.is_set():
+                return
+            child = koreops.tap_spawn(node_ip, name, who=self._who())
+            with subs_mu:
+                if sid in subs:
+                    subs[sid]["child"] = child
+                else:
+                    return                       # unsubbed during spawn
+            for raw in child.stdout:
+                if stop.is_set():
+                    break
+                kind, _, rest = raw.rstrip(b"\r\n").partition(b" ")
+                if kind == b"o":
+                    if not send_json({"t": "out", "id": sid,
+                                      "b64": rest.decode("ascii", "replace")}):
+                        break
+                elif kind in (b"r", b"g"):
+                    cols, _, rows = rest.partition(b"x")
+                    try:
+                        geom = {"cols": int(cols), "rows": int(rows)}
+                    except ValueError:
+                        continue
+                    geom.update(t="hello" if kind == b"r" else "geom", id=sid)
+                    if not send_json(geom):
+                        break
+                elif kind == b"h":
+                    continue                     # tap heartbeat; WS has its own ping
+                elif kind == b"e":
+                    send_json({"t": "err", "id": sid,
+                               "error": rest.decode("utf8", "replace")})
+                    break
+        except (OSError, ValueError):
+            pass
+        except Exception as exc:                 # noqa: BLE001 - one sub's fault, say it
+            sys.stderr.write("[workbench] ws sub error\n" + traceback.format_exc())
+            try:
+                send_json({"t": "err", "id": sid, "error": f"{type(exc).__name__}: {exc}"})
+            except Exception:                    # noqa: BLE001
+                pass
+        finally:
+            self._ws_kill_child(child)
+            removed = False
+            with subs_mu:
+                if sid in subs:
+                    del subs[sid]
+                    removed = True
+            if removed:
+                with _stream_mu:
+                    _streams_open -= 1
+            try:
+                send_json({"t": "end", "id": sid})
+            except Exception:                    # noqa: BLE001 - socket may be gone
+                pass
+
+    def _wview(self, path: str, query: str) -> None:
+        """Browser-window reverse proxy: fetch a target URL SERVER-SIDE and re-serve it with
+        the target's framing headers (X-Frame-Options / CSP frame-ancestors) stripped, so the
+        dashboard's <iframe> can display intranet / framing-refusing pages.
+
+        URL shape: /api/kore/wview/<ticket>/<urlsafe-b64 origin>/<path>?<query>. The ticket
+        (see _wview_ticket) lives in the PATH so the <base href> + root-relative rewrites carry
+        it to every sub-resource. It is NOT the board token: the proxied page can read its
+        own URL. Every response is CSP-sandboxed to an opaque origin (WVIEW_HEADERS).
+
+        Best-effort: rewrites root-relative and relative URLs through the proxy; SPAs that
+        build absolute URLs in JS or need websockets may still partly break. GET only."""
+        import urllib.request, urllib.error  # noqa: PLC0415,E401
+        raw = path[len("/api/kore/wview/"):]
+        try:
+            ticket, rest = raw.split("/", 1)
+        except ValueError:
+            self._wview_err(400, "bad", "地址格式不对"); return
+        if not _wview_ticket_ok(ticket):
+            self._wview_err(401, "auth", "浏览器窗口的凭据过期了，点一下刷新"); return
+        b64, tail = rest.split("/", 1) if "/" in rest else (rest, "")
+        try:
+            origin = base64.urlsafe_b64decode(b64 + "==").decode("utf-8")
+        except Exception:  # noqa: BLE001
+            self._wview_err(400, "bad", "地址格式不对"); return
+        m = re.match(r"^(https?)://([^/@]+)$", origin)
+        if not m:
+            self._wview_err(400, "bad", "地址格式不对"); return
+        hostport = m.group(2)
+        host = hostport[1:hostport.index("]")] if hostport.startswith("[") and "]" in hostport \
+            else hostport.rsplit(":", 1)[0]
+        why = _wview_host_ok(host)
+        if why:
+            self._wview_err(403, "blocked", f"不允许访问这个地址（{why}）"); return
+        target = origin + "/" + tail + (("?" + query) if query else "")
+
+        class _Hop(urllib.request.HTTPRedirectHandler):
+            # every redirect hop is re-judged — a 302 to the metadata IP must not slip by
+            def redirect_request(self, req, fp, code, msg, hdrs, newurl):  # noqa: N802
+                h = urlsplit(newurl).hostname or ""
+                if _wview_host_ok(h):
+                    raise urllib.error.URLError(f"redirect to blocked host {h}")
+                return super().redirect_request(req, fp, code, msg, hdrs, newurl)
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _Hop)  # never via a proxy
+        req = urllib.request.Request(target, headers={
+            "User-Agent": self.headers.get("User-Agent", "kore-wview"),
+            "Accept": self.headers.get("Accept", "*/*"), "Accept-Encoding": "identity",
+            "Accept-Language": self.headers.get("Accept-Language", "zh-CN,zh;q=0.9")})
+        try:
+            r = opener.open(req, timeout=15)
+            code, ct, body = r.getcode(), r.headers.get("Content-Type", "application/octet-stream"), r.read(WVIEW_MAX)
+        except urllib.error.HTTPError as e:  # serve the target's own error body (still deframed)
+            code, ct, body = e.code, e.headers.get("Content-Type", "text/html; charset=utf-8"), e.read(WVIEW_MAX)
+        except Exception as e:  # noqa: BLE001
+            msg = str(getattr(e, "reason", e))
+            kind = "timeout" if "timed out" in msg else "refused" if "refused" in msg.lower() \
+                else "dns" if "Name or service" in msg or "getaddrinfo" in msg else "net"
+            self._wview_err(502, kind, f"服务器连不上 {origin}（{msg}）"); return
+        if "text/html" in ct.lower():
+            cs = re.search(r"charset=([\w-]+)", ct, re.I)
+            try:
+                html = body.decode(cs.group(1) if cs else "utf-8", "replace")
+            except LookupError:
+                html = body.decode("utf-8", "replace")
+            prefix = f"/api/kore/wview/{ticket}/{b64}/"
+            base = f'<base href="{prefix}">'
+            html = (re.sub(r"(<head[^>]*>)", lambda mo: mo.group(1) + base, html, count=1, flags=re.I)
+                    if re.search(r"<head[^>]*>", html, re.I) else base + html)
+            # root-relative src/href/action="/x" -> proxy prefix (not protocol-relative //host)
+            html = re.sub(r'((?:src|href|action)\s*=\s*["\'])/(?!/)', lambda mo: mo.group(1) + prefix, html, flags=re.I)
+            body, ct = html.encode("utf-8"), "text/html; charset=utf-8"
+        # Re-served with NO X-Frame-Options / frame-ancestors (never copied) -> framable.
+        # The target's real status is kept (a 404 is a 404, not a fake 200).
+        self._send(code, body, ct, headers=WVIEW_HEADERS)
+
+    def _wview_err(self, code: int, kind: str, msg: str) -> None:
+        """A proxy failure as a small page that reads OK in both themes (the iframe sits on
+        the window's panel colour). X-Kore-Wview-Error names the class for the frontend."""
+        safe = msg.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        page = ("<!doctype html><meta charset=utf-8><meta name=color-scheme content='light dark'>"
+                "<body style='margin:0;display:grid;place-items:center;min-height:100vh;"
+                "font:13px/1.6 system-ui,-apple-system,\"PingFang SC\",\"Microsoft YaHei\",sans-serif;"
+                "color:#6f6f76;background:transparent'><div style='max-width:420px;padding:24px;"
+                f"text-align:center'><div style='font-size:15px;margin-bottom:6px'>打不开这个页面</div>{safe}"
+                "</div></body>")
+        self._send(code, page.encode(), "text/html; charset=utf-8",
+                   headers={**WVIEW_HEADERS, "X-Kore-Wview-Error": kind})
+
     def do_GET(self) -> None:  # noqa: N802
         parts = urlsplit(self.path)
         path = parts.path
@@ -1165,8 +1687,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/health":
                 self._send(200, b'{"ok":true}', "application/json")
                 return
+            if path.startswith("/api/kore/wview/"):
+                # Browser-window reverse proxy. Auth is a wview-only ticket embedded in the
+                # PATH (so sub-resource requests carry it), checked inside _wview — dispatch
+                # it BEFORE the query-token gate below.
+                self._wview(path, parts.query)
+                return
             if not self._authorized(parts.query):
                 self._send(401, b'{"error":"unauthorized"}', "application/json")
+                return
+            if path == "/ws":
+                # The one read-only multiplexed output transport (see the WebSocket
+                # section). Auth was just checked, exactly like the SSE read feeds.
+                self._ws_serve()
                 return
             if path in ("/", "/index.html"):
                 # 页面本身不许被缓存住（改页面是常事，而且不能让人看到旧的那一份），但
@@ -1225,6 +1758,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # local to this board: nothing reaches a node, so it needs the WB Bearer
                 # token but not koreops' gate or a `confirm`.
                 self._labels_endpoint(raw)
+                return
+            if path.startswith("/api/kore/fs/"):
+                # File-browser WRITES (mkdir/rename/delete/upload). A separate door from the
+                # tmux WRITE_VERBS below: the target is a PATH, not a session, so the gate
+                # (koreops.fs_write) keys audit + confirm by path, not NAME_RE. Same Bearer
+                # (checked above) and the same confirm discipline, path-shaped.
+                self._fs_write_endpoint(path, raw)
                 return
             verb = path.rsplit("/", 1)[1] if path.startswith("/api/kore/") else ""
             if verb not in koreops.WRITE_VERBS:
@@ -1324,6 +1864,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": str(exc)})
             return
         self._json(200, {"ok": True, "labels": labels})
+
+    _FS_WRITE_ROUTES = {"mkdir": "mkdir", "rename": "rename", "delete": "delete",
+                        "upload": "put"}
+    """URL route -> koreops fs op. `upload` is the chunked `put` (base64 bytes, append flag);
+    the other three carry just paths. The route name is what `confirm` names, so the browser
+    confirms exactly the endpoint it POSTs to."""
+
+    def _fs_write_endpoint(self, path: str, raw: bytes) -> None:
+        """POST /api/kore/fs/{mkdir,rename,delete,upload}. Bearer already checked by do_POST.
+
+        confirm = `fs-<route>:<node_ip>:<path>` — a write must name its own target, the same
+        discipline as the tmux verbs, keyed by path. Params are whitelisted to the fs shape
+        (path/dst/data/append); koreops.fs_write runs the same _validate-style gate and the
+        node's fixed script enforces roots + deny."""
+        route = path.rsplit("/", 1)[1]
+        op = self._FS_WRITE_ROUTES.get(route)
+        if op is None:
+            self._json(404, {"ok": False, "error": f"no fs write endpoint {path!r}"})
+            return
+        try:
+            body = json.loads(raw.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._json(400, {"ok": False, "error": f"bad JSON body: {exc}"})
+            return
+        if not isinstance(body, dict):
+            self._json(400, {"ok": False, "error": "body must be a JSON object"})
+            return
+        node_ip, pth = str(body.get("node_ip") or ""), str(body.get("path") or "")
+        want = f"fs-{route}:{node_ip}:{pth}"
+        if str(body.get("confirm") or "") != want:
+            self._json(400, {"ok": False, "error": f"confirm must equal {want!r}",
+                             "hint": "a file write has to name its own target path"})
+            return
+        params = {k: body[k] for k in ("path", "dst", "data", "append") if k in body}
+        try:
+            self._json(200, koreops.fs_write(node_ip, op, params, who=self._who()))
+        except koreops.KoreOpsError as exc:
+            self._json(403, {"ok": False, "refused": str(exc)})
 
     def _agents_register_endpoint(self, raw: bytes) -> None:
         """Client agent → server registry push: the one door a client joins through.

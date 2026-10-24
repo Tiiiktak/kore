@@ -25,6 +25,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import signal
 import socket
 import sys
@@ -60,6 +61,16 @@ _HOST = (socket.gethostname() or "host").split(".")[0]
 PORTFILE = os.path.join(STATE_DIR, f"agent-{_HOST}.port")
 # Outcome of the latest registration attempt, read by `kore client` / `kore status`.
 STATUSFILE = os.path.join(STATE_DIR, f"client-{_HOST}.status")
+# Per-session agent-status files, written by the Claude Code hooks (see the hook section
+# below) and read by the server's session_state(). ~/.kore is often shared storage, but a
+# session name is globally unique in kore, so a flat dir keyed by tmux session name is safe.
+AGENT_STATE_DIR = os.path.join(STATE_DIR, "agent-state")
+# Claude Code user settings — where we register our lifecycle hooks (idempotently).
+CLAUDE_SETTINGS = os.path.expanduser(
+    os.environ.get("KORE_CLAUDE_SETTINGS") or "~/.claude/settings.json")
+# Lifecycle hooks we subscribe to. We match-all (no matcher) and classify in the handler.
+HOOK_EVENTS = ("Notification", "Stop", "UserPromptSubmit",
+               "SessionStart", "SessionEnd", "SubagentStop")
 
 IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 SESSION_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
@@ -458,6 +469,206 @@ def heartbeat_loop(port: int, stop: threading.Event, on_rejected) -> None:
             return
 
 
+# ===================================================================== status hooks
+# cmux's lesson (manaflow-ai/cmux): don't screen-scrape the terminal to guess what an
+# agent is doing — let Claude Code's HOOKS tell you, authoritatively. Claude Code invokes
+# `kore-agent.py hook <EVENT>` on each lifecycle event with a JSON payload on stdin; we map
+# it to busy/waiting/idle/ended and drop a per-session state file the server reads (with the
+# old regex scraper kept as a fallback for sessions that predate the hooks). State model
+# mirrors cmux's ChatAgentState (working / needsInput / idle / ended).
+
+
+def _tokens(s: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", s.lower())
+
+
+def _completion_cue(s: str) -> bool:
+    # "done", "completed", "finished successfully" -> turn finished (cmux containsCompletionCue).
+    return any(t == "done" or t in ("succeed", "succeeded")
+               or t.startswith(("complet", "finish", "success")) for t in _tokens(s))
+
+
+def _waiting_cue(s: str) -> bool:
+    # "waiting for input", "needs your input", a trailing question (cmux containsWaitingCue).
+    toks = _tokens(s)
+    for i, t in enumerate(toks):
+        if t in ("idle", "wait", "waiting", "awaiting"):
+            return True
+        if t == "input":
+            prev = toks[i - 1] if i > 0 else ""
+            if prev in ("need", "needs", "needed", "require", "requires", "required",
+                        "request", "requests", "requested", "wait", "waiting", "awaiting",
+                        "user", "your"):
+                return True
+        if t == "question" and "?" in s:
+            return True
+    return False
+
+
+def _classify_notification(payload: dict) -> tuple[str | None, str]:
+    nt = str(payload.get("notification_type") or "").lower()
+    low = " ".join(str(payload.get(k) or "") for k in ("title", "message")).lower()
+    # Yellow ("需要人回复") is reserved for a genuine BLOCKING approval request. kore sessions
+    # run --dangerously-skip-permissions so this is rare, but honor it when it happens.
+    if nt == "permission_prompt" or "permission" in low or "approve" in low or "approval" in low:
+        return "waiting", "permission"
+    # Claude's idle nudge ("… is waiting for your input") and completion messages both mean the
+    # agent is FINISHED and sitting idle — that is idle, NOT an urgent blink. (A real
+    # AskUserQuestion choice menu is detected separately by the pane scraper on the server.)
+    if nt.startswith("idle") or _waiting_cue(low) or _completion_cue(low):
+        return "idle", "idle-prompt" if nt.startswith("idle") else "done"
+    return None, ""   # unknown notification: make no claim, keep the current state
+
+
+def classify_hook(event: str, payload: dict, prev: dict | None) -> tuple[str | None, str]:
+    """Map a Claude Code hook event to a kore state, or (None, "") to leave it unchanged."""
+    ev = event or str(payload.get("hook_event_name") or "")
+    if ev == "UserPromptSubmit":
+        return "busy", "prompt"
+    if ev == "SessionStart":
+        return "idle", "start"
+    if ev == "SessionEnd":
+        return "ended", str(payload.get("reason") or "")
+    if ev == "SubagentStop":
+        return "busy", "subagent"           # a subagent finished; the parent turn continues
+    if ev == "Notification":
+        return _classify_notification(payload)
+    if ev == "Stop":
+        # Preserve waiting across a same-turn Stop ONLY for a pending approval (cmux
+        # stopPreservesNeedsInput). Anything else resolves to idle, so a finished agent
+        # never stays yellow.
+        if prev and prev.get("state") == "waiting" and prev.get("detail") == "permission":
+            return "waiting", "permission"
+        return "idle", "stop"
+    return None, ""
+
+
+def _resolve_tmux_session() -> str:
+    """The tmux session name of the pane this hook fired in, or "" if not in tmux."""
+    pane = os.environ.get("TMUX_PANE", "")
+    if not pane or not os.environ.get("TMUX"):
+        return ""
+    import subprocess
+    try:
+        r = subprocess.run(["tmux", "display-message", "-p", "-t", pane, "#S"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            return r.stdout.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _read_state(session: str) -> dict | None:
+    try:
+        with open(os.path.join(AGENT_STATE_DIR, session + ".json")) as f:
+            rec = json.load(f)
+        return rec if isinstance(rec, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def write_state(session: str, state: str, event: str, detail: str) -> None:
+    os.makedirs(AGENT_STATE_DIR, exist_ok=True)
+    path = os.path.join(AGENT_STATE_DIR, session + ".json")
+    now = time.time()
+    since = now
+    prev = _read_state(session)
+    if prev and prev.get("state") == state and prev.get("since"):
+        since = prev["since"]   # keep the start time while the state holds
+    rec = {"state": state, "since": round(since, 3), "event": event,
+           "detail": detail, "ts": round(now, 3)}
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(rec, f)
+    os.replace(tmp, path)
+
+
+def hook_main(event: str) -> int:
+    """`kore-agent.py hook <EVENT>`: the Claude Code hook entry point. Never blocks or
+    errors out — it always exits 0 with empty stdout so it cannot disturb Claude's flow."""
+    try:
+        raw = sys.stdin.read()
+    except Exception:  # noqa: BLE001
+        raw = ""
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:  # noqa: BLE001
+        payload = {}
+    try:
+        session = _resolve_tmux_session()
+        # Only record kore-managed sessions; the hooks are global but the server only ever
+        # reads prefixed names, so a plain claude session on this machine stays untouched.
+        if not session or not session.startswith(TMUX_PREFIX):
+            return 0
+        state, detail = classify_hook(event, payload, _read_state(session))
+        if state is None:
+            return 0
+        write_state(session, state, event or str(payload.get("hook_event_name") or ""), detail)
+    except Exception:  # noqa: BLE001 - a hook must never surface an error to Claude
+        pass
+    return 0
+
+
+_HOOK_SIG = "kore-agent.py hook "   # how we recognize (and replace) our own hook entries
+
+
+def install_hooks() -> bool:
+    """Idempotently register our lifecycle hooks in ~/.claude/settings.json. Merges with the
+    user's existing hooks, replaces only our own marked entries, and refuses to touch a file
+    it cannot parse. Opt out with KORE_NO_HOOKS=1. Returns True if hooks are in place."""
+    if os.environ.get("KORE_NO_HOOKS"):
+        return False
+    agent = os.path.abspath(__file__)
+    command = f"{shlex.quote(sys.executable or 'python3')} {shlex.quote(agent)} hook"
+    try:
+        data: dict = {}
+        if os.path.exists(CLAUDE_SETTINGS):
+            try:
+                with open(CLAUDE_SETTINGS) as f:
+                    data = json.load(f)
+            except Exception as exc:  # noqa: BLE001
+                log(f"NOT installing hooks: {CLAUDE_SETTINGS} is unreadable/invalid ({exc})")
+                return False
+            if not isinstance(data, dict):
+                log(f"NOT installing hooks: {CLAUDE_SETTINGS} is not a JSON object")
+                return False
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+        changed = False
+        for ev in HOOK_EVENTS:
+            groups = hooks.get(ev)
+            groups = list(groups) if isinstance(groups, list) else []
+            kept = [g for g in groups if not _is_our_group(g)]
+            kept.append({"hooks": [{"type": "command", "command": f"{command} {ev}"}]})
+            if kept != groups:
+                changed = True
+            hooks[ev] = kept
+        if not changed:
+            return True
+        data["hooks"] = hooks
+        os.makedirs(os.path.dirname(CLAUDE_SETTINGS), exist_ok=True)
+        tmp = f"{CLAUDE_SETTINGS}.tmp.{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, CLAUDE_SETTINGS)
+        log(f"installed kore status hooks into {CLAUDE_SETTINGS}")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log(f"hook install failed (non-fatal): {exc!r}")
+        return False
+
+
+def _is_our_group(group: object) -> bool:
+    if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+        return False
+    return any(isinstance(h, dict) and _HOOK_SIG in str(h.get("command", ""))
+               for h in group["hooks"])
+
+
 # ============================================================================= HTTP
 
 
@@ -658,6 +869,7 @@ def main() -> int:
     httpd.daemon_threads = True
     port = httpd.server_address[1]
     _write_portfile(port)
+    install_hooks()  # idempotent; opt out with KORE_NO_HOOKS=1
     log(f"listening on {KORE_AGENT_BIND}:{port} (node_ip={NODE_IP}, "
         f"url=http://{NODE_IP}:{port}, auth={'on' if KORE_AGENT_TOKEN else 'OFF'})")
 
@@ -707,4 +919,11 @@ def _rejected_now() -> bool:
 
 
 if __name__ == "__main__":
+    # Subcommands that must run WITHOUT a server (Claude Code invokes the hook; the installer
+    # runs on the self node where no agent lives) — handle them before main()'s env checks.
+    _argv = sys.argv[1:]
+    if _argv[:1] == ["hook"]:
+        sys.exit(hook_main(_argv[1] if len(_argv) > 1 else ""))
+    if _argv[:1] == ["install-hooks"]:
+        sys.exit(0 if install_hooks() else 1)
     sys.exit(main())

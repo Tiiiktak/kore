@@ -3,7 +3,7 @@
 
 Mechanism: a "kore session" is a tmux session named `kore-<name>` on a node, running
 the interactive Claude Code CLI. We drive it with `tmux send-keys` and read it with
-`tmux capture-pane`, inferring busy/idle from the CLI's own UI strings.
+`tmux capture-pane`, inferring busy/waiting/idle from the CLI's own UI strings.
 
 Routing is per node and needs no configuration: a command for THIS host (the server's
 own node) runs here directly with `subprocess`; a command for any other node is POSTed
@@ -59,8 +59,8 @@ KORE_AGENT_TOKEN = os.environ.get("KORE_AGENT_TOKEN", "")
 # picks the wrong interface.
 KORE_NODE_IP = os.environ.get("KORE_NODE_IP", "").strip()
 
-# Claude Code signals it is working with these strings; kept as a tuple so a Claude Code UI change
-# is a one-line edit.
+# Legacy "Claude Code is working" strings. Current Claude Code no longer prints most of them;
+# pane_state() uses them only as a fallback and only on the last lines of the pane.
 BUSY_MARKERS = ("esc to interrupt", "Topsy-turvying", "Thinking", "esc to cancel", "Generating")
 READY_MARKERS = ("bypass permissions", "Welcome back", "for getting started", "What can I help", ">")
 CHROME_MARKERS = (
@@ -245,8 +245,152 @@ def clean(text: str) -> str:
     return out
 
 
+# --- session state detection -------------------------------------------------------------
+# States: "busy" (Claude is working / retrying), "waiting" (Claude is blocked on a user
+# choice: permission prompt, AskUserQuestion menu), "idle" (finished, prompt is free).
+# Only the bottom of the pane counts: a stale spinner or marker far up the scrollback
+# must never make a finished session look busy.
+STATE_TAIL_LINES = 15
+_SPIN = r"[✻✽✢✶✳✺✹✷✸*·•+✦◆]"
+# Live spinner: "✻ Working… (27s · ↓ 1.5k tokens)", "* Cogitating… (12s · esc to interrupt)".
+# The verb is random, so match the shape: glyph, words, ellipsis, "(" with a duration or
+# the interrupt hint.
+_ACTIVE_RE = re.compile(
+    _SPIN + r"\s+\S[^\n]*?(?:…|\.\.\.)\s*\((?=[^)\n]*(?:\b\d+\s*[hms]\b|esc to interrupt))"
+)
+_RETRY_RE = re.compile(r"Waiting for API response|will retry in\b|Retrying in\b", re.I)
+# Finished: "✻ Churned for 2m 13s · done 7:13 PM", "Baked for 40s".
+_PAST_RE = re.compile(r"^\s*(?:" + _SPIN + r"\s+)?[A-Z][a-z-]+ed for \d+\s*[hms]\b|·\s*done\b")
+# Choice menus: "❯ 1. Yes", "│ ❯ 1. Yes", plus the prompt captions around them.
+_OPTION_CUR_RE = re.compile(r"^[\s│|]*❯\s*\d+[.)]\s+\S")
+_OPTION_RE = re.compile(r"^[\s│|]*(?:❯\s*)?\d+[.)]\s+\S")
+_ASK_RE = re.compile(
+    r"Do you want to|Would you like to|Enter to select|↑/↓ to navigate|"
+    r"Esc to cancel|Tab to amend|don't ask again", re.I)
+# The empty input box Claude Code shows when it accepts free text ("❯ " on its own).
+_EMPTY_PROMPT_RE = re.compile(r"^[\s│|]*[❯>]\s*$")
+_RULE_RE = re.compile(r"^[\s─━╭╰│]*[─━]{8,}")
+
+
+def _tail_lines(pane: str) -> list[str]:
+    """Last STATE_TAIL_LINES non-empty lines of the pane, ANSI-stripped.
+
+    The window is anchored on the input box when one is visible, so a long footer under
+    it (subagent list, status lines) cannot push the spinner line out of the window."""
+    lines = [ln.rstrip() for ln in ANSI_RE.sub("", pane or "").splitlines() if ln.strip()]
+    end = len(lines)
+    for i in range(len(lines) - 1, max(-1, len(lines) - 40), -1):
+        if _EMPTY_PROMPT_RE.match(lines[i]) and i > 0 and _RULE_RE.match(lines[i - 1]):
+            end = i + 1  # include the box itself; lines below are footer chrome
+            break
+    tail = lines[max(0, end - STATE_TAIL_LINES):end]
+    return tail + lines[end:]
+
+
+def pane_state(pane: str) -> str:
+    """Classify a Claude Code pane as "busy", "waiting" or "idle" (see the block comment)."""
+    tail = _tail_lines(pane)
+    # waiting: a numbered choice menu with its cursor, and no free input box under it.
+    for i in range(len(tail) - 1, -1, -1):
+        ln = tail[i]
+        if _EMPTY_PROMPT_RE.match(ln):
+            break  # an empty input box below anything else means Claude takes free text
+        if _OPTION_CUR_RE.match(ln):
+            opts = sum(1 for x in tail if _OPTION_RE.match(x))
+            if opts >= 2 or any(_ASK_RE.search(x) for x in tail):
+                return "waiting"
+    # busy / idle: the bottom-most status line decides.
+    for ln in reversed(tail):
+        if _RETRY_RE.search(ln) or _ACTIVE_RE.search(ln):
+            return "busy"
+        if _PAST_RE.search(ln):
+            return "idle"
+    # Legacy markers as a fallback signal, but only inside the tail window.
+    if any(m in ln for ln in tail for m in BUSY_MARKERS):
+        return "busy"
+    return "idle"
+
+
 def is_busy(pane: str) -> bool:
-    return any(m in pane for m in BUSY_MARKERS)
+    return pane_state(pane) == "busy"
+
+
+# --- hook-driven state (preferred over the scraper above) --------------------------------
+# kore-agent's Claude Code hooks drop a per-session file on the node; the node is the agent's
+# own host, so we fetch these over the same sh()/`/exec` path we use for everything else. A
+# session with a usable hook record takes that state; anything else (adopted/pre-hook
+# sessions, or a node where hooks aren't installed) falls back to pane_state() scraping.
+_AGENT_STATE_GLOB = "~/.kore/agent-state"
+
+
+def node_hook_states(node_ip: str) -> dict[str, dict]:
+    """All of a node's hook state records, {session_name: record}, in one round-trip."""
+    cmd = (f'for f in {_AGENT_STATE_GLOB}/*.json; do [ -e "$f" ] || continue; '
+           'printf "%s\\t" "$(basename "$f" .json)"; tr -d "\\n" < "$f"; printf "\\n"; done')
+    out: dict[str, dict] = {}
+    try:
+        r = sh(node_ip, cmd, 20)
+    except Exception:  # noqa: BLE001 - never let a missing/odd state dir break the roster
+        return out
+    for line in (r.get("stdout") or "").splitlines():
+        if "\t" not in line:
+            continue
+        name, js = line.split("\t", 1)
+        try:
+            rec = json.loads(js)
+            if isinstance(rec, dict):
+                out[name] = rec
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return out
+
+
+def _read_hook_state(node_ip: str, name: str) -> dict | None:
+    try:
+        r = sh(node_ip, f"cat {_AGENT_STATE_GLOB}/{name}.json 2>/dev/null || true", 15)
+    except Exception:  # noqa: BLE001
+        return None
+    txt = (r.get("stdout") or "").strip()
+    if not txt:
+        return None
+    try:
+        rec = json.loads(txt)
+        return rec if isinstance(rec, dict) else None
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def session_state(node_ip: str, name: str, pane: str,
+                  states: dict[str, dict] | None = None) -> str:
+    """kore state for a session: the hook record if it has one, else the pane scraper.
+
+    Pass `states` (from node_hook_states) to classify a whole roster with one round-trip;
+    omit it to fetch this one session's record on demand (the wait loop / single reads)."""
+    rec = states.get(name) if states is not None else _read_hook_state(node_ip, name)
+    st = rec.get("state") if rec else None
+    if st in ("busy", "waiting", "idle"):
+        # A visible choice menu (AskUserQuestion) is an unambiguous "需要人回复" even while the
+        # hook still reads busy (an in-turn question keeps the hook on busy) or idle (a Stop
+        # fired with the menu left up). The scraper CAN see the menu, so let it upgrade
+        # busy/idle -> waiting. A finished idle prompt scrapes as idle, so it stays idle.
+        if st != "waiting" and pane_state(pane) == "waiting":
+            return "waiting"
+        return st
+    return pane_state(pane)   # ended / missing / unparsable -> fall back to scraping
+
+
+def mark_busy(node_ip: str, name: str) -> None:
+    """Optimistically flip a session to busy the instant we deliver input (cmux's
+    afterExplicitInput), so the dot reacts without waiting for the UserPromptSubmit hook.
+    `name` is norm_name-validated (alnum/_/-), so it is safe to interpolate into the path."""
+    try:
+        sh(node_ip,
+           f'mkdir -p {_AGENT_STATE_GLOB} && t=$(date +%s) && '
+           'printf \'{"state":"busy","since":%s,"event":"kore-input","ts":%s}\' "$t" "$t" '
+           f'> {_AGENT_STATE_GLOB}/{name}.json',
+           15)
+    except Exception:  # noqa: BLE001 - best-effort; the real hooks are authoritative
+        pass
 
 
 def has_session(node_ip: str, name: str) -> bool:
@@ -487,6 +631,7 @@ def kore_list(node_ip: str | None = None, with_summary: bool = True) -> dict[str
         if "NONE" in r["stdout"]:
             continue
         facts = jm.get(ip, {})
+        states = node_hook_states(ip)   # one round-trip; hook records for all this node's sessions
         for line in r["stdout"].strip().splitlines():
             name = line.split(":")[0].strip()
             if not name:
@@ -503,8 +648,17 @@ def kore_list(node_ip: str | None = None, with_summary: bool = True) -> dict[str
                 "gpus": facts.get("gpus", 0),
                 "role": (reg.get(name) or {}).get("role", ""),
                 "cwd": (reg.get(name) or {}).get("cwd", ""),
-                "state": "busy" if is_busy(pane) else "idle",
+                "state": session_state(ip, name, pane, states),
             }
+            # Surface the hook record's idle-stretch identity so the board can show a one-shot
+            # "刚干完，去看看" indicator that clears once the user opens the session. `since`
+            # marks when this idle/busy stretch began (stable across idle-prompt nudges).
+            rec = states.get(name)
+            if isinstance(rec, dict):
+                if rec.get("since") is not None:
+                    entry["state_since"] = rec["since"]
+                if rec.get("detail"):
+                    entry["state_detail"] = rec["detail"]
             if with_summary:
                 entry["summary"] = summarize(ip, name)
             sessions.append(entry)
@@ -531,30 +685,22 @@ def kore_start(node_ip: str, name: str, cwd: str = "~", role: str = "", claude_p
         # a cwd of `/tmp'; rm -rf /x #` used to break straight out of send-keys' quotes.
         inner = (f"cd {quote_path(target)} && IS_SANDBOX=1 {shlex.quote(claude)} "
                  f"--dangerously-skip-permissions")
+        # Only TYPE the launch command into the pane — do NOT press Enter, and do nothing
+        # else afterwards (no trust-folder auto-confirm, no readiness polling). The human runs
+        # it from the terminal when ready. (`echo OK` runs in the node's outer shell, not the
+        # pane, so it just confirms new-session + send-keys succeeded.)
         cmd = (
             f"tmux new-session -d -s {name} -c {quote_path(target)} && "
-            f"tmux send-keys -t {name} {shlex.quote(inner)} Enter && echo OK"
+            f"tmux send-keys -t {name} {shlex.quote(inner)} && echo OK"
         )
         r = sh(node_ip, cmd, 30)
         if "OK" not in r["stdout"]:
             return {"ok": False, "error": (r["stderr"] or r["stdout"] or "tmux new-session failed").strip()}
 
-        for _ in range(25):
-            time.sleep(1)
-            pane = capture(node_ip, name, 40)
-            if "trust this folder" in pane or "Yes, I trust" in pane:
-                send_keys(node_ip, name, key="Enter")
-                time.sleep(2)
-                continue
-            if any(m in pane for m in READY_MARKERS):
-                register(name, node_ip, cwd, role)
-                return {"ok": True, "name": name, "node_ip": node_ip, "cwd": cwd,
-                        "role": role, "state": "ready"}
-
         register(name, node_ip, cwd, role)
         return {"ok": True, "name": name, "node_ip": node_ip, "cwd": cwd, "role": role,
-                "state": "started_unconfirmed",
-                "note": "tmux started but Claude Code readiness markers never appeared; use kore_read to inspect"}
+                "state": "created",
+                "note": "启动命令已输入 tmux 会话但未回车；在终端里按 Enter 即可启动 Claude Code"}
 
 
 def kore_send(node_ip: str, name: str, message: str, wait: bool = True, timeout: int = 600) -> dict[str, Any]:
@@ -568,6 +714,7 @@ def kore_send(node_ip: str, name: str, message: str, wait: bool = True, timeout:
             send_keys(node_ip, name, literal=message)
             time.sleep(0.3)
         send_keys(node_ip, name, key="Enter")
+        mark_busy(node_ip, name)   # optimistic: the turn is starting (UserPromptSubmit confirms)
 
         if not wait:
             time.sleep(3)
@@ -580,8 +727,13 @@ def kore_send(node_ip: str, name: str, message: str, wait: bool = True, timeout:
         while time.time() < deadline:
             pane = capture(node_ip, name, 200)
             last = pane
-            if is_busy(pane):
+            st = session_state(node_ip, name, pane)
+            if st == "busy":
                 idle_streak = 0
+            elif st == "waiting":
+                # Claude stopped on a permission / choice prompt: nothing settles until
+                # someone answers, so hand back now instead of burning the timeout.
+                return {"ok": True, "name": name, "state": "waiting", "output": clean(pane)}
             else:
                 idle_streak += 1
                 # Two consecutive idle reads: Claude Code pauses between tool calls, so a
@@ -601,7 +753,7 @@ def kore_read(node_ip: str, name: str, lines: int = 120) -> dict[str, Any]:
     if not has_session(node_ip, name):
         return {"ok": False, "error": f"session {name!r} not found on {node_ip}"}
     pane = capture(node_ip, name, lines)
-    return {"ok": True, "name": name, "state": "busy" if is_busy(pane) else "idle",
+    return {"ok": True, "name": name, "state": session_state(node_ip, name, pane),
             "output": clean(pane)}
 
 
@@ -629,10 +781,67 @@ def kore_status(node_ip: str, name: str) -> dict[str, Any]:
     )
     claude_alive = "ALIVE" in r["stdout"]
     pane = capture(node_ip, name, 40)
-    busy = is_busy(pane)
-    state = "busy" if (claude_alive and busy) else "idle" if claude_alive else "tmux_only"
+    state = session_state(node_ip, name, pane) if claude_alive else "tmux_only"
     return {"ok": True, "name": name, "tmux": True, "claude": claude_alive,
             "state": state, "summary": summarize(node_ip, name)}
+
+
+def list_unmanaged(node_ip: str) -> list[dict[str, Any]]:
+    """tmux sessions on node_ip that do NOT carry the prefix — candidates for kore_adopt.
+
+    `adoptable` is false (with `why`) when the name cannot be adopted as-is: characters a
+    session name may not have, a prefixed name that would be too long for the write door
+    (48), or a `<prefix><name>` session that already exists."""
+    validate_ip(node_ip)
+    r = sh(node_ip, "tmux list-sessions -F "
+                    "'#{session_name}\t#{session_windows}\t#{session_attached}\t#{pane_current_path}'"
+                    " 2>/dev/null || true", 20)
+    rows = [ln.split("\t") for ln in r["stdout"].splitlines() if ln.strip()]
+    names = {row[0] for row in rows}
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        name = row[0]
+        if name.startswith(TMUX_PREFIX):
+            continue
+        full = TMUX_PREFIX + name
+        why = ""
+        if not SESSION_NAME_RE.match(name):
+            why = "名字只能含字母、数字、- 和 _"
+        elif len(full) > 48:
+            why = f"加上前缀后超过 48 个字符（{full}）"
+        elif full in names:
+            why = f"已经有一个叫 {full} 的 session"
+        out.append({"name": name, "full_name": full,
+                    "windows": int(row[1]) if len(row) > 1 and row[1].isdigit() else 0,
+                    "attached": len(row) > 2 and row[2] not in ("", "0"),
+                    "cwd": row[3] if len(row) > 3 else "",
+                    "adoptable": not why, "why": why})
+    return out
+
+
+def kore_adopt(node_ip: str, name: str) -> dict[str, Any]:
+    """Bring an existing tmux session under kore by renaming it into the prefix
+    (`work` -> `kore-work`). Nothing inside the session is touched: the programs keep
+    running and attached clients stay attached. `-t =name` matches the name exactly, so a
+    session called `work` can never be confused with `work2`."""
+    validate_ip(node_ip)
+    if not SESSION_NAME_RE.match(name or "") or name.startswith(TMUX_PREFIX):
+        return {"ok": False, "error": f"cannot adopt {name!r}: needs an unprefixed name "
+                                      f"of letters, digits, - and _"}
+    full = TMUX_PREFIX + name
+    with session_lock(node_ip, full):
+        r = sh(node_ip,
+               f"if ! tmux has-session -t ={name} 2>/dev/null; then echo NOSUCH; "
+               f"elif tmux has-session -t ={full} 2>/dev/null; then echo EXISTS; "
+               f"else tmux rename-session -t ={name} {full} && echo OK; fi", 20)
+    out = r["stdout"]
+    if "OK" in out:
+        return {"ok": True, "name": full, "from": name, "action": "adopted"}
+    if "NOSUCH" in out:
+        return {"ok": False, "error": f"no tmux session named {name!r} on {node_ip}"}
+    if "EXISTS" in out:
+        return {"ok": False, "error": f"a session named {full!r} already exists on {node_ip}"}
+    return {"ok": False, "error": (r["stderr"] or out or "tmux rename-session failed").strip()}
 
 
 def kore_stop(node_ip: str, name: str) -> dict[str, Any]:
@@ -678,7 +887,7 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "kore_list",
         "description": (
-            "List kore sessions (Claude Code teammates) with node, job name, role, busy/idle state and a "
+            "List kore sessions (Claude Code teammates) with node, job name, role, busy/waiting/idle state and a "
             "short summary of what each is doing. This is the roster view: call it to see the whole team "
             "at once. Omit node_ip to scan registered nodes, or all alive nodes when none are registered."
         ),
@@ -775,7 +984,7 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "kore_status",
         "description": (
-            "Health-check one kore teammate: tmux alive, the claude process alive, busy/idle, plus an "
+            "Health-check one kore teammate: tmux alive, the claude process alive, busy/waiting/idle (waiting = blocked on a permission/choice prompt), plus an "
             "activity summary. 'tmux_only' means Claude Code crashed and the session needs restarting."
         ),
         "inputSchema": {

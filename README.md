@@ -143,6 +143,7 @@ the server's own node.
 |---|---|
 | `kore` / `kore server` (central node) | start the dashboard in the background, print a tokened link **and** the `kore client …` join command. Also a worker, so one machine needs nothing else. `kore server --restart` applies new config to a running board |
 | `kore client --server <ip:port> --token <tok>` | join THIS machine as a worker node, in the background (paste the server's join line); no defaults. `--foreground` to stay attached |
+| `kore adopt [NAME…]` | bring tmux sessions that already run on this machine under kore: with no name it lists the ones without the prefix; `kore adopt work` renames `work` → `kore-work` (the programs inside keep running), `--all` adds every one. The dashboard's **+ 已有 session** does the same for any machine |
 | `kore down` | stop whatever kore runs on this machine (the server and/or a client) |
 | `kore status` | what runs on this machine: the server (with its link) and/or a client (with its registration state) |
 | `kore upgrade` | update kore in place to the latest release — `--version vX.Y.Z` to pin, `--check` to only compare. Handles an install.sh install (re-runs the installer), a git clone (fast-forwards it) and a `uv tool` install (reinstalls from git) |
@@ -156,7 +157,9 @@ subcommand so server/client/mcp can't disagree: `--agent-token`, `--agents-file`
 `--prefix`, `--node-ip`. Example: `kore --agent-token "$TOK" server`.
 
 Any tmux session whose name carries the prefix (`kore-*` by default) shows up on the board
-automatically, on whichever node it lives.
+automatically, on whichever node it lives. A session you started yourself under another
+name can be added with `kore adopt <name>` on that machine, or from the dashboard
+(**+ 已有 session**): kore renames it into the prefix; nothing inside it is restarted.
 
 ## What's in the box
 
@@ -233,7 +236,9 @@ Other engine env (all optional): `KORE_BRIDGE_PREFIX` (tmux name prefix, default
 `GET /api/state` · `/api/kore/roster` · `/api/kore/read` · `/api/kore/stream` (SSE line-diff) ·
 `/api/kore/bytes` (SSE byte relay) · `/api/kore/status` · `/api/kore/jobs` · `/api/kore/job` ·
 `/api/agents` (the client registry, TTL-pruned) · `/api/join` (the add-a-machine panel).
-`POST /api/kore/{start,stop,send,keys,input,resize}` drives a session.
+`GET /api/kore/unmanaged?node_ip=` lists a node's tmux sessions without the prefix.
+`POST /api/kore/{start,stop,send,keys,input,resize,adopt}` drives a session (`adopt` renames
+an existing session into the prefix).
 `POST /api/labels` sets a nickname / icon for a node or session (dashboard-only, no node is touched).
 `POST /api/agents/register` is the client registry-push door — fenced by `KORE_AGENT_TOKEN`,
 a **different** token domain from the dashboard's WB token.

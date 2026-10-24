@@ -4,6 +4,41 @@ All notable changes to **kore** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **New dashboard frontend.** The hand-written single-file board was rebuilt as a
+  React + TypeScript + Tailwind + shadcn/ui app, still served as one self-contained
+  `index.html` (deploy stays a copy). It brings a multi-window workspace (split
+  terminals / browser / files), an xterm terminal over a multiplexed WebSocket (with the
+  SSE feed as fallback), a reverse-proxy **browser window** (scoped, expiring wview ticket;
+  the proxied page runs CSP-sandboxed), a ⌘K command palette, and a mobile layout.
+- **File browser.** Browse a node's session cwds + `$HOME` (lazy tree, syntax-highlighted
+  preview) and manage files: new folder, rename, delete (hard `rm`, two-step confirm),
+  unlimited chunked upload, download, and image preview. All path policy is enforced on the
+  node by a fixed `python3 -I` sandbox script — never leaves the session roots / `$HOME`,
+  refuses `~/.ssh`, `~/.kore`, key/token files and `/proc`,`/sys`,`/dev`. Every write runs
+  through the same write-agent + audit pipeline as the tmux verbs (gated by `kore.fs` in the
+  allowlist), keyed by path.
+- **Add existing tmux sessions.** `kore adopt` lists the tmux sessions on this machine that
+  do not carry the prefix; `kore adopt <name>` (or `--all`) renames them into it
+  (`work` → `kore-work`) — the programs inside keep running and attached terminals stay
+  attached. The dashboard's **+ 已有 session** does the same for every machine (server and
+  clients), through the gated `adopt` write (`POST /api/kore/adopt`, audited like other
+  writes) and the read-only `GET /api/kore/unmanaged`.
+- **One tab per machine** above the session list ("全部" plus each node), remembered per
+  browser; the node count pill now only appears when something is wrong.
+- The dashboard remembers its layout across reloads: open session tabs and the active one
+  (reopened if it still exists), top/left tab bar, the selected machine tab.
+
+### Changed
+- Session icons are the Claude Code logo in white (drawn as exact SVG pixels, truly
+  centered) on a colored tile picked from the session name; machines have no icon, and their
+  nickname is edited by clicking the machine name. The custom fruit/animal icon set is gone.
+- The tab-bar toggle sits right of the logo; both stay put when the layout switches.
+- No element is outlined on just one side (separators became spacing or tinted blocks) —
+  an owner design rule the new frontend carries forward.
+
 ## [0.5.0] — 2026-10-23
 
 ### Added

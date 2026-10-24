@@ -9,6 +9,9 @@
     kore client     join THIS machine to a server as a worker node. Requires
                     `--server <ip:port>` and `--token <tok>` (from the server's join
                     line) — there is no default.
+    kore adopt      bring existing tmux sessions on THIS machine under kore: with no
+                    names, list the ones without the prefix; `kore adopt work` renames
+                    `work` -> `kore-work` (the programs inside keep running)
     kore down       stop the background dashboard started by `kore server`
     kore status     is the background dashboard up? reprint its link
     kore upgrade    update kore in place to the latest release (`--version vX.Y.Z` to
@@ -365,6 +368,16 @@ def _server(rest: list) -> int:
     _pidfile_write(PIDFILE, proc.pid)
     _runfile_write(host, port, prefix)
 
+    # Register Claude Code status hooks for THIS (self) node. It runs claude sessions but has
+    # no kore-agent of its own to self-install them (client nodes do that on agent startup).
+    # Best-effort and idempotent (opt out with KORE_NO_HOOKS=1); must not block startup.
+    try:
+        subprocess.run([sys.executable, os.path.join(PKG, AGENT_PY), "install-hooks"],
+                       env=os.environ.copy(), timeout=10,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:  # noqa: BLE001
+        pass
+
     # Wait for the board to answer, so the link we print actually opens.
     deadline = time.time() + 15
     while time.time() < deadline:
@@ -516,6 +529,90 @@ def _client(rest: list) -> int:
             f"       KORE_NODE_IP=<reachable-ip> kore client --server {server} --token …\n")
     sys.stdout.write(f"\n  logs:  {CLIENT_LOGFILE}\n  stop:  kore down\n\n")
     return 0
+
+
+_SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _tmux_out(*args: str) -> tuple:
+    try:
+        r = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=10)
+        return r.returncode, r.stdout, r.stderr
+    except FileNotFoundError:
+        return 127, "", "tmux is not installed"
+    except subprocess.TimeoutExpired:
+        return 124, "", "tmux did not answer"
+
+
+def _adopt(rest: list) -> int:
+    """Bring existing tmux sessions on THIS machine under kore by renaming them into the
+    prefix. Nothing inside a session changes; attached terminals stay attached. The same
+    action is in the dashboard ("+ 已有 session"), which also reaches client machines."""
+    ap = argparse.ArgumentParser(
+        prog="kore adopt",
+        description="Add existing tmux sessions on this machine to kore (renames NAME to "
+                    "<prefix>NAME). With no NAME, list the sessions that can be added.")
+    ap.add_argument("names", nargs="*", metavar="NAME", help="tmux session(s) to add")
+    ap.add_argument("--all", action="store_true", help="add every session that can be added")
+    args = ap.parse_args(rest)
+    prefix = _env("BRIDGE_PREFIX", "kore-")
+
+    rc, out, err = _tmux_out("list-sessions", "-F", "#{session_name}\t#{session_windows}\t#{session_attached}")
+    if rc == 127:
+        sys.stderr.write("tmux is not installed or not on PATH.\n")
+        return 2
+    rows = [ln.split("\t") for ln in out.splitlines() if ln.strip()] if rc == 0 else []
+    existing = {r[0] for r in rows}
+
+    def why_not(name: str) -> str:
+        if name.startswith(prefix):
+            return f"already managed (has the {prefix!r} prefix)"
+        if not _SESSION_RE.match(name):
+            return "name may only contain letters, digits, - and _"
+        if len(prefix + name) > 48:
+            return f"{prefix + name!r} would be longer than 48 characters"
+        if prefix + name in existing:
+            return f"a session named {prefix + name!r} already exists"
+        return ""
+
+    candidates = [r for r in rows if not r[0].startswith(prefix)]
+    if not args.names and not args.all:
+        if not candidates:
+            sys.stdout.write(f"no tmux sessions without the {prefix!r} prefix on this machine.\n")
+            return 0
+        sys.stdout.write(f"tmux sessions on this machine that kore does not manage yet:\n\n")
+        for r in candidates:
+            name = r[0]
+            win = r[1] if len(r) > 1 else "?"
+            att = " (attached)" if len(r) > 2 and r[2] not in ("", "0") else ""
+            w = why_not(name)
+            sys.stdout.write(f"  {name:24} {win} window(s){att}" + (f"   — can't add: {w}" if w else "") + "\n")
+        sys.stdout.write(f"\nadd one:   kore adopt <name>     (renames it to {prefix}<name>)\n"
+                         f"add all:   kore adopt --all\n")
+        return 0
+
+    names = [r[0] for r in candidates if not why_not(r[0])] if args.all else args.names
+    status = 0
+    for name in names:
+        if name not in existing:
+            sys.stderr.write(f"✗ {name}: no tmux session with that name\n")
+            status = 1
+            continue
+        w = why_not(name)
+        if w:
+            sys.stderr.write(f"✗ {name}: {w}\n")
+            status = 1
+            continue
+        rc, _o, e = _tmux_out("rename-session", "-t", f"={name}", prefix + name)
+        if rc != 0:
+            sys.stderr.write(f"✗ {name}: {e.strip() or 'tmux rename-session failed'}\n")
+            status = 1
+            continue
+        existing.add(prefix + name)
+        sys.stdout.write(f"✓ {name} -> {prefix + name}  (now on the dashboard)\n")
+    if not names:
+        sys.stdout.write("nothing to add.\n")
+    return status
 
 
 def _client_status() -> dict:
@@ -1082,7 +1179,7 @@ def _upgrade(rest: list) -> int:
 def main(argv=None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     _apply_env_defaults()
-    commands = ["server", "client", "down", "status", "upgrade", "mcp", "ops", "doctor"]
+    commands = ["server", "client", "adopt", "down", "status", "upgrade", "mcp", "ops", "doctor"]
 
     # Split at the FIRST recognized subcommand: everything before it is kore's own
     # (identity flags / -h), everything after is passed through verbatim. This keeps
@@ -1099,7 +1196,7 @@ def main(argv=None) -> int:
                     "MCP tools. Just run `kore` (= `kore server`) to start the central node; "
                     "add machines by pasting the `kore client …` line it prints. Put identity "
                     "flags BEFORE the subcommand, e.g. `kore --agent-token $TOK server`. "
-                    "Subcommands: server client down status upgrade mcp ops doctor.")
+                    "Subcommands: server client adopt down status upgrade mcp ops doctor.")
     p.add_argument("-V", "--version", action="version", version=f"kore {_VERSION}")
     for flag, _suffix, helptext in _IDENTITY:
         p.add_argument(flag, help=helptext, default=None)
@@ -1119,6 +1216,8 @@ def main(argv=None) -> int:
         return _server(rest)
     if command == "client":
         return _client(rest)
+    if command == "adopt":
+        return _adopt(rest)
     if command == "down":
         return _down(rest)
     if command == "status":

@@ -1,0 +1,207 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* kore palette mapped onto shadcn tokens (ported from the old board's :root / html.dark),
+   plus kore's own status colors so Tailwind utilities like text-busy / bg-brand/10 exist. */
+@theme inline {
+    --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+      'Microsoft YaHei', 'Noto Sans CJK SC', Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+    --font-heading: var(--font-sans);
+    --color-ok: var(--ok);
+    --color-busy: var(--busy);
+    --color-waiting: var(--waiting);
+    --color-idle: var(--idle);
+    --color-bad: var(--bad);
+    --color-claude: var(--claude);
+    --color-brand: var(--brand);
+    --color-ok-bg: var(--ok-bg);
+    --color-busy-bg: var(--busy-bg);
+    --color-idle-bg: var(--idle-bg);
+    --color-brand-bg: var(--brand-bg);
+
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.75);
+    --radius-md: var(--radius);
+    --radius-lg: calc(var(--radius) * 1.5);
+    --radius-xl: calc(var(--radius) * 2);
+}
+
+:root {
+    --radius: 0.5rem;
+    --background: #f5f5f7;
+    --foreground: #1d1d1f;
+    --card: #ffffff;
+    --card-foreground: #1d1d1f;
+    --popover: #ffffff;
+    --popover-foreground: #1d1d1f;
+    --primary: #111111;
+    --primary-foreground: #ffffff;
+    --secondary: #ededf0;
+    --secondary-foreground: #1d1d1f;
+    --muted: #f0f0f2;
+    --muted-foreground: #5c5c63;
+    --accent: #eceef2;
+    --accent-foreground: #1d1d1f;
+    --destructive: #cf222e;
+    --border: #e4e4e7;
+    --input: #e4e4e7;
+    --ring: #8e8e93;
+    /* kore status + brand */
+    --ok: #1a7f37;
+    --busy: #9a6700;
+    --waiting: #c2410c;
+    --idle: #0969da;
+    --done: #0969da;
+    --bad: #cf222e;
+    --claude: #d77757;
+    --brand: #8250df;
+    --ok-bg: #e9f5ec;
+    --busy-bg: #fdf4e0;
+    --idle-bg: #e9f2fd;
+    --brand-bg: #f2ecfd;
+    --chart-1: #8250df;
+    --chart-2: #0969da;
+    --chart-3: #1a7f37;
+    --chart-4: #9a6700;
+    --chart-5: #bf3989;
+    --sidebar: #ffffff;
+    --sidebar-foreground: #1d1d1f;
+    --sidebar-primary: #111111;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #eceef2;
+    --sidebar-accent-foreground: #1d1d1f;
+    --sidebar-border: #e4e4e7;
+    --sidebar-ring: #8e8e93;
+}
+
+.dark {
+    --background: #0d1117;
+    --foreground: #e6edf3;
+    --card: #161b22;
+    --card-foreground: #e6edf3;
+    --popover: #161b22;
+    --popover-foreground: #e6edf3;
+    --primary: #e6edf3;
+    --primary-foreground: #0d1117;
+    --secondary: #1c222b;
+    --secondary-foreground: #e6edf3;
+    --muted: #1c222b;
+    --muted-foreground: #adbac7;
+    --accent: #1c222b;
+    --accent-foreground: #e6edf3;
+    --destructive: #f85149;
+    --border: #2a3039;
+    --input: #2a3039;
+    --ring: #6e7781;
+    --ok: #3fb950;
+    --busy: #d29922;
+    --waiting: #e0a080;
+    --idle: #58a6ff;
+    --done: #58a6ff;
+    --bad: #f85149;
+    --claude: #e0a080;
+    --brand: #a371f7;
+    --ok-bg: #122119;
+    --busy-bg: #241c0e;
+    --idle-bg: #10203a;
+    --brand-bg: #1e1830;
+    --chart-1: #a371f7;
+    --chart-2: #58a6ff;
+    --chart-3: #3fb950;
+    --chart-4: #d29922;
+    --chart-5: #bf3989;
+    --sidebar: #161b22;
+    --sidebar-foreground: #e6edf3;
+    --sidebar-primary: #e6edf3;
+    --sidebar-primary-foreground: #0d1117;
+    --sidebar-accent: #1c222b;
+    --sidebar-accent-foreground: #e6edf3;
+    --sidebar-border: #2a3039;
+    --sidebar-ring: #6e7781;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+    font-size: 15px;                 /* old-board density: scales the whole rem system down */
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+}
+
+/* busy status dot: one breathing ring (transform/opacity only — compositor cheap). */
+@keyframes kore-pulse {
+  0% { transform: scale(1); opacity: 0.7; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+.kore-pulse::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  border: 1.5px solid currentColor;
+  animation: kore-pulse 1.6s ease-out infinite;
+}
+/* needs-you: urgent on/off flash (急闪) on the dot itself */
+@keyframes kore-blink {
+  0%, 44% { opacity: 1; }
+  50%, 94% { opacity: 0.2; }
+  100% { opacity: 1; }
+}
+.kore-blink { animation: kore-blink 0.85s steps(1, end) infinite; }
+
+/* Quality floor: visible keyboard focus on custom interactive elements (shadcn components set
+   their own; :where() keeps 0 specificity so those still win). And honor reduced-motion. */
+:where([role="button"], [role="option"], [role="tab"], [role="menuitem"], [role="separator"]):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .kore-pulse::after, .kore-blink { animation: none !important; }
+}

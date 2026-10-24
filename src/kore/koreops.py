@@ -80,6 +80,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import signal
 import subprocess
 import sys
@@ -127,7 +128,7 @@ ROLE_RE = re.compile(r"^[^\x00-\x1f]{0,200}$")
 # refusal (see _clean_origin). These regexes only keep junk out of the audit log.
 ORIGIN_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
-WRITE_VERBS = ("start", "stop", "send", "keys", "input", "resize")
+WRITE_VERBS = ("start", "stop", "send", "keys", "input", "resize", "adopt")
 """Every verb that can change something on a remote host. Membership here is what makes
 `_validate()` run (nodes / deny_nodes / protected_sessions / verbs) and what `do_POST`
 checks before it will route a request at all — so a new write verb that is NOT in this
@@ -156,7 +157,7 @@ DEFAULT_POLICY: dict[str, Any] = {
     # a dashboard click must never start or kill processes on) without a code change.
     "deny_nodes": [],
     "verbs": {"start": True, "stop": True, "send": True, "keys": True, "input": True,
-              "resize": True},
+              "resize": True, "adopt": True},
     # Interlock, not a permission. Keep in sync with the allowlist's `kore.protected_sessions`,
     # which overrides this whole list. Empty by default: nothing is protected unless the
     # allowlist names it. The CHECK in _validate() is untouched — it is the mechanism, this
@@ -283,6 +284,20 @@ DEFAULT_POLICY: dict[str, Any] = {
     # in flight to the read agent — see `_read_slot()`.
     "read_agent_log_max_bytes": 1048576,
     "read_agent_slots": 8,
+    # ---- file-browser WRITES (Phase 2) -----------------------------------------------
+    # Each op is gated here AND on the node (the fixed `_FS_WRITE_SCRIPT` re-checks roots +
+    # deny on every call). `put_chunk_bytes` is NOT a size cap — uploads are unlimited and
+    # sent as many `put` chunks — it is the per-chunk RAW byte budget that keeps the whole
+    # `sh -c` command under MAX_ARG_STRLEN (128 KiB for one execve argument; 48 KiB raw ->
+    # ~87 KiB base64 argv). KEEP IN SYNC with dispatch-allowlist.json, which sets it
+    # explicitly and therefore overrides.
+    "fs": {"enabled": True,
+           "ops": {"mkdir": True, "rename": True, "delete": True, "put": True},
+           "put_chunk_bytes": 49152},
+    # Node-side budget for one file write (rmtree of a big tree is the slow case). The
+    # parent's write-agent wait (fs_write_timeout_s) must stay above this + _sh_http slack.
+    "fs_write_node_timeout_s": 30,
+    "fs_write_timeout_s": 60.0,
 }
 
 
@@ -413,7 +428,8 @@ PROBE_SENTINEL = "<<<KOREOPS-PROBE>>>"
 the parent reads only that line. Without this, one stray stdout line becomes a parse error
 and the panel goes blank for a reason that has nothing to do with the read."""
 
-_PROBE_KINDS = ("roster-registry", "roster-cluster", "alive", "read", "status")
+_PROBE_KINDS = ("roster-registry", "roster-cluster", "alive", "read", "status", "unmanaged",
+                "fs")
 """Reads only, and an explicit list rather than "any bridge attribute" — a child
 that can be told which function to call is a new hole, not a fix.
 
@@ -468,6 +484,9 @@ def _probe_timeout(kind: str) -> float:
         # A cluster sweep pays a long timeout per wedged node, serially in the worst
         # case, so it cannot share the registry scan's budget.
         return float(pol.get("cluster_probe_timeout_s", 90.0))
+    if kind == "fs":
+        # Node-side budget (fs_timeout_s, 10s) + the /exec HTTP slack _sh_http adds (15s).
+        return float(pol.get("fs_probe_timeout_s", 30.0))
     return float(pol.get("probe_timeout_s", 20.0))
 
 
@@ -639,7 +658,7 @@ def _term_parse(br: Any, node_ip: str, name: str, out: str, stderr: str,
         text = keep.split("\n", 1)[1] if "\n" in keep else keep
         clipped = raw - len(text.encode("utf-8"))
     plain = br.clean(screen)
-    return {"ok": True, "name": name, "state": "busy" if br.is_busy(plain) else "idle",
+    return {"ok": True, "name": name, "state": br.pane_state(plain),
             "output": text, "ansi": True, "screen_only": bool(screen_only),
             "cols": cols, "rows": rows, "history_size": hist_size,
             "cursor_x": cx, "cursor_y": cy, "cursor_vis": bool(cvis),
@@ -668,6 +687,569 @@ def _term_read(br: Any, node_ip: str, name: str, lines: int,
               int(pol.get("term_capture_timeout_s", 20)))
     return _term_parse(br, node_ip, full, r.get("stdout") or "", r.get("stderr") or "",
                        screen_only, int(pol.get("term_max_bytes", 262144)))
+
+
+# ------------------------------------------------------------- file browser (read-only)
+#
+# The file-browser window lists directories and reads files on a node. Everything that
+# touches the file system runs ON THE NODE inside one FIXED Python program (`_FS_SCRIPT`),
+# reached through the same `br.sh()` chokepoint as every other read and from inside the
+# resident read agent (kind "fs"), so a hung NFS mount costs one read, never the board.
+#
+# User input (the path, flags) never becomes shell or Python source: it travels as ONE
+# base64-encoded JSON argv element, shlex-quoted. The policy (roots, deny list) is enforced
+# by the script itself, after os.path.realpath, because only the node knows what a symlink
+# there really points at. Roots are recomputed on the node on every call — nothing the
+# client sends can widen them.
+
+_FS_SENTINEL = "<<<KORE-FS>>>"
+_FS_OPS = ("roots", "list", "read", "readb")
+
+_FS_SCRIPT = r'''
+import base64, json, os, re, stat, subprocess, sys
+CAP_ENTRIES = 2000
+CAP_BYTES = 512 * 1024
+SNIFF = 8192
+def u(s):
+    if isinstance(s, bytes):
+        return s.decode("utf-8", "replace")
+    return s.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+def out(o):
+    sys.stdout.write("<<<KORE-FS>>>" + json.dumps(o, ensure_ascii=True) + "\n")
+    sys.stdout.flush()
+    sys.exit(0)
+def refuse(m):
+    out({"ok": False, "refused": m})
+def err(m):
+    out({"ok": False, "error": m})
+try:
+    A = json.loads(base64.b64decode(sys.argv[1]).decode("utf-8"))
+    assert isinstance(A, dict)
+except Exception:
+    refuse("参数无法解析")
+def under(p, base):
+    return p == base or p.startswith(base.rstrip("/") + "/")
+def homes():
+    hs = [os.environ.get("HOME") or ""]
+    try:
+        import pwd
+        hs.append(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:
+        pass
+    return [h for h in dict.fromkeys(hs) if h.startswith("/")]
+SYS_DIRS = ("/proc", "/sys", "/dev")
+SECRET_DIRS = []
+for h in homes():
+    for d in (".ssh", ".kore", ".cc-bridge-dsh", ".gnupg", ".aws"):
+        p = os.path.join(h, d)
+        SECRET_DIRS += [os.path.normpath(p), os.path.realpath(p)]
+DENY_FILES = set()
+for f in A.get("deny_extra") or []:
+    if isinstance(f, str) and f.startswith("/"):
+        DENY_FILES.update((os.path.normpath(f), os.path.realpath(f)))
+SECRET_NAME = re.compile(r"^(id_(rsa|dsa|ecdsa|ed25519).*|.*\.pem|.*\.key|\.?[A-Za-z0-9_-]*\.token"
+                         r"|\.netrc|\.git-credentials|\.pgpass)$")
+def denied(p):
+    for b in SYS_DIRS:
+        if under(p, b):
+            return "系统目录 /proc、/sys、/dev 不允许浏览"
+    for b in SECRET_DIRS:
+        if under(p, b):
+            return "这个目录存放密钥或凭据（~/.ssh、~/.kore 等），不允许浏览"
+    if p in DENY_FILES or SECRET_NAME.match(os.path.basename(p)):
+        return "疑似密钥或令牌文件，不允许读取"
+    return None
+def roots():
+    pre = A.get("prefix") or ""
+    found = []
+    if isinstance(pre, str) and pre:
+        try:
+            r = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}\t#{pane_current_path}"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+            for ln in r.stdout.decode("utf-8", "surrogateescape").splitlines():
+                nm, _, path = ln.partition("\t")
+                if nm.startswith(pre) and path.startswith("/"):
+                    found.append((nm[len(pre):], path))
+        except Exception:
+            pass
+    h = homes()
+    if h:
+        found.append((None, h[0]))
+    res, seen = [], set()
+    for nm, path in found:
+        rp = os.path.realpath(path)
+        if rp in seen or rp == "/" or denied(rp) or not os.path.isdir(rp):
+            continue
+        seen.add(rp)
+        label = "主目录" if nm is None else nm + " · " + (os.path.basename(rp) or rp)
+        res.append({"id": u(rp), "label": u(label), "path": u(rp), "_raw": rp})
+    return res
+def resolve(raw):
+    if not isinstance(raw, str) or not raw.startswith("/") or "\x00" in raw or len(raw) > 4096:
+        refuse("路径必须是绝对路径")
+    rp = os.path.realpath(raw)
+    for c in (os.path.normpath(raw), rp):
+        why = denied(c)
+        if why:
+            refuse(why)
+    R = roots()
+    hits = [r["_raw"] for r in R if os.path.commonpath([r["_raw"], rp]) == r["_raw"]]
+    if not hits:
+        refuse("这个路径不在任何 session 的工作目录或主目录之下")
+    return rp, max(hits, key=len), set(r["_raw"] for r in R)
+def stat_or_err(rp):
+    try:
+        return os.stat(rp)
+    except FileNotFoundError:
+        err("路径不存在：" + u(rp))
+    except PermissionError:
+        err("没有权限访问：" + u(rp))
+    except OSError as e:
+        err("无法访问 " + u(rp) + "：" + u(e.strerror or str(e)))
+def kind_of(mode):
+    if stat.S_ISDIR(mode):
+        return "dir"
+    if stat.S_ISREG(mode):
+        return "file"
+    return "other"
+def nkey(n):
+    return [int(t) if i % 2 else t.casefold() for i, t in enumerate(re.split(r"(\d+)", n))]
+def do_list():
+    rp, root, rootset = resolve(A.get("path"))
+    st = stat_or_err(rp)
+    if not stat.S_ISDIR(st.st_mode):
+        err("不是目录：" + u(rp))
+    hidden = bool(A.get("hidden"))
+    items = []
+    try:
+        with os.scandir(rp) as it:
+            for e in it:
+                n = e.name
+                if not hidden and n.startswith("."):
+                    continue
+                if denied(os.path.join(rp, n)):
+                    continue
+                try:
+                    isd = e.is_dir()
+                except OSError:
+                    isd = False
+                items.append((0 if isd else 1, nkey(n), n, e))
+    except PermissionError:
+        err("没有权限读取目录：" + u(rp))
+    except OSError as e:
+        err("无法读取目录 " + u(rp) + "：" + u(e.strerror or str(e)))
+    items.sort(key=lambda t: (t[0], t[1], t[2]))
+    entries = []
+    for _rank, _k, n, e in items[:CAP_ENTRIES]:
+        d = {"name": u(n)}
+        try:
+            lst = e.stat(follow_symlinks=False)
+        except OSError:
+            lst = None
+        st2 = lst
+        try:
+            link = e.is_symlink()
+        except OSError:
+            link = False
+        if link:
+            try:
+                d["target"] = u(os.readlink(os.path.join(rp, n)))
+            except OSError:
+                d["target"] = ""
+            try:
+                st2 = e.stat()
+                d["kind"] = kind_of(st2.st_mode)
+            except OSError:
+                st2 = lst
+                d["kind"] = "link"
+                d["broken"] = True
+        else:
+            d["kind"] = kind_of(lst.st_mode) if lst else "other"
+        d["size"] = int(st2.st_size) if st2 else 0
+        d["mtime"] = float(st2.st_mtime) if st2 else 0.0
+        entries.append(d)
+    out({"ok": True, "path": u(rp), "parent": None if rp in rootset else u(os.path.dirname(rp)),
+         "root": u(root), "entries": entries, "truncated": len(items) > CAP_ENTRIES})
+def decode(b):
+    t = b.decode("utf-8", "replace")
+    bad = t.count("\ufffd")
+    if bad > max(4, len(t) // 100):
+        t2 = b.decode("gb18030", "replace")
+        b2 = t2.count("\ufffd")
+        # gb18030 maps almost any high-byte noise to some hanzi, so it only wins when the
+        # file decodes (nearly) cleanly — otherwise the utf-8 error count decides "binary".
+        if b2 < bad and b2 <= len(t2) // 200:
+            t, bad = t2, b2
+    return t, bad
+def do_read():
+    rp, _root, _rs = resolve(A.get("path"))
+    st = stat_or_err(rp)
+    if stat.S_ISDIR(st.st_mode):
+        err("这是目录，不是文件：" + u(rp))
+    if not stat.S_ISREG(st.st_mode):
+        err("不是普通文件：" + u(rp))
+    tail = A.get("tail")
+    try:
+        with open(rp, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            head = f.read(SNIFF)
+            if tail is None:
+                f.seek(0)
+                data = f.read(CAP_BYTES)
+                truncated = size > CAP_BYTES
+            else:
+                start = max(0, size - CAP_BYTES)
+                f.seek(start)
+                data = f.read(CAP_BYTES)
+                truncated = start > 0
+                if start > 0 and b"\n" in data:
+                    data = data.split(b"\n", 1)[1]
+                n = int(tail)
+                if n > 0:
+                    nl = data.endswith(b"\n")
+                    lines = (data[:-1] if nl else data).split(b"\n")
+                    if len(lines) > n:
+                        lines = lines[-n:]
+                        truncated = True
+                    data = b"\n".join(lines) + (b"\n" if nl and lines else b"")
+    except PermissionError:
+        err("没有权限读取：" + u(rp))
+    except OSError as e:
+        err("无法读取 " + u(rp) + "：" + u(e.strerror or str(e)))
+    binary = b"\x00" in head or b"\x00" in data[:SNIFF]
+    text = ""
+    if not binary and data:
+        text, bad = decode(data)
+        binary = bad > 0.3 * max(1, len(text))
+    out({"ok": True, "path": u(rp), "size": int(size), "mtime": float(st.st_mtime),
+         "binary": bool(binary), "truncated": bool(truncated), "text": "" if binary else text})
+def do_readb():
+    # One byte RANGE of a file, as base64. Same read-only policy as every other op; the
+    # browser loops on `offset` to pull an image / a download in order. CAP bounds one
+    # round trip, not the file: a 2GB download is 2048 of these, not one 2GB stdout line.
+    CAP = 1048576
+    rp, _root, _rs = resolve(A.get("path"))
+    st = stat_or_err(rp)
+    if stat.S_ISDIR(st.st_mode):
+        err("这是目录，不是文件：" + u(rp))
+    if not stat.S_ISREG(st.st_mode):
+        err("不是普通文件：" + u(rp))
+    try:
+        off = max(0, int(A.get("offset") or 0))
+    except (TypeError, ValueError):
+        off = 0
+    try:
+        ln = int(A.get("len") or 0)
+    except (TypeError, ValueError):
+        ln = 0
+    if ln <= 0 or ln > CAP:
+        ln = CAP
+    try:
+        with open(rp, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            f.seek(off)
+            data = f.read(ln)
+    except PermissionError:
+        err("没有权限读取：" + u(rp))
+    except OSError as e:
+        err("无法读取 " + u(rp) + "：" + u(e.strerror or str(e)))
+    out({"ok": True, "path": u(rp), "size": int(size), "offset": int(off),
+         "len": len(data), "eof": off + len(data) >= size,
+         "data": base64.b64encode(data).decode("ascii")})
+try:
+    OP = A.get("op")
+    if OP == "roots":
+        out({"ok": True, "roots": [{k: v for k, v in r.items() if k != "_raw"} for r in roots()]})
+    elif OP == "list":
+        do_list()
+    elif OP == "read":
+        do_read()
+    elif OP == "readb":
+        do_readb()
+    else:
+        refuse("未知的文件操作")
+except PermissionError as e:
+    err("没有权限：" + u(str(e)))
+except Exception as e:
+    err("读取失败：" + type(e).__name__ + ": " + u(str(e)))
+'''
+"""The node-side half of the file browser. A FIXED program: it is never formatted,
+templated or concatenated with anything. Its only input is argv[1], base64(JSON) of
+`{"op", "path", "hidden", "tail", "offset", "len", "prefix", "deny_extra"}`, and its only output is one
+`<<<KORE-FS>>>{json}` line on stdout:
+
+    {"ok": true, ...}                       the answer
+    {"ok": false, "error": "<中文>"}       not found / not a dir / permission (HTTP 200)
+    {"ok": false, "refused": "<中文>"}     policy (outside roots, /proc, ~/.ssh, keys …)
+
+Written for python3 >= 3.6 because it runs on whatever interpreter the node has (`-I`:
+no cwd / user-site / PYTHON* env on sys.path, so a planted module cannot hijack it)."""
+
+
+def _fs_cmd(req: dict[str, Any]) -> str:
+    """The one shell command for one file-browser op: the fixed script plus one opaque,
+    quoted argument. Nothing the client sent is ever interpolated."""
+    arg = base64.b64encode(json.dumps(req, ensure_ascii=False).encode("utf-8")).decode("ascii")
+    return f"python3 -I -c {shlex.quote(_FS_SCRIPT)} {shlex.quote(arg)}"
+
+
+def _fs_parse(stdout: str) -> dict[str, Any] | None:
+    for ln in reversed((stdout or "").splitlines()):
+        if ln.startswith(_FS_SENTINEL):
+            try:
+                obj = json.loads(ln[len(_FS_SENTINEL):])
+            except json.JSONDecodeError:
+                return None
+            return obj if isinstance(obj, dict) else None
+    return None
+
+
+def _fs_run(br: Any, node_ip: str, req: dict[str, Any]) -> dict[str, Any]:
+    """Child side of kind "fs": run the fixed script on the node, hand back its dict."""
+    br.validate_ip(node_ip)
+    if req.get("op") not in _FS_OPS:
+        return {"ok": False, "refused": "未知的文件操作"}
+    req = {**req, "prefix": getattr(br, "TMUX_PREFIX", "kore-")}
+    extra = [os.environ.get("WB_TOKEN_FILE") or "",
+             os.path.join(HERE, "workbench", ".token")]
+    req["deny_extra"] = [p for p in extra if p.startswith("/")]
+    r = br.sh(node_ip, _fs_cmd(req), int(policy().get("fs_timeout_s", 10)))
+    got = _fs_parse(r.get("stdout") or "")
+    if got is None:
+        why = (r.get("stderr") or "").strip()[-300:]
+        return {"ok": False, "error": f"节点上的文件读取脚本没有给出结果（rc={r.get('rc')}）"
+                                      + (f"：{why}" if why else "")}
+    return got
+
+
+# -------------------------------------------------------------- file browser WRITES
+#
+# The write half of the file browser. It is NOT a new permission boundary: whoever holds
+# the WB token can already RCE every node through the gated `send`/`input` verbs (the agent
+# token guards the far `/exec`). So the job here is to reuse the read sandbox's node-side
+# policy verbatim, run every write inside the FIXED `_FS_WRITE_SCRIPT`, and send each op
+# through the SAME write-agent + audit pipeline the tmux verbs use — so a file write is
+# accountable (one `_audit` row) and can never reach outside the roots or touch a key file.
+#
+# Why a second fixed script rather than widening `_FS_SCRIPT`: `under()/denied()/roots()/
+# resolve()` are copied EXACTLY so the write policy cannot drift from the read policy, but
+# keeping the two programs separate means the read agent (which serves every pane capture)
+# literally cannot be asked to mutate anything — it only knows `_FS_SCRIPT`.
+#
+# Chunking (`put`): the whole command reaches the node as one `sh -c "<cmd>"` string, and a
+# single execve argument is capped at MAX_ARG_STRLEN (128 KiB, measured), NOT the 2 MB
+# total ARG_MAX. So an upload of any size is MANY `put` calls of `put_chunk_bytes` raw bytes
+# each (first truncates, rest append), never one giant argv. 48 KiB raw -> ~87 KiB of
+# argv-safe base64 inside ~96 KiB of command, comfortably under the ceiling.
+
+FS_WRITE_OPS = ("mkdir", "rename", "delete", "put")
+
+_FS_WRITE_SCRIPT = r'''
+import base64, json, os, re, shutil, stat, subprocess, sys
+def u(s):
+    if isinstance(s, bytes):
+        return s.decode("utf-8", "replace")
+    return s.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+def out(o):
+    sys.stdout.write("<<<KORE-FS>>>" + json.dumps(o, ensure_ascii=True) + "\n")
+    sys.stdout.flush()
+    sys.exit(0)
+def refuse(m):
+    out({"ok": False, "refused": m})
+def err(m):
+    out({"ok": False, "error": m})
+try:
+    A = json.loads(base64.b64decode(sys.argv[1]).decode("utf-8"))
+    assert isinstance(A, dict)
+except Exception:
+    refuse("参数无法解析")
+def under(p, base):
+    return p == base or p.startswith(base.rstrip("/") + "/")
+def homes():
+    hs = [os.environ.get("HOME") or ""]
+    try:
+        import pwd
+        hs.append(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:
+        pass
+    return [h for h in dict.fromkeys(hs) if h.startswith("/")]
+SYS_DIRS = ("/proc", "/sys", "/dev")
+SECRET_DIRS = []
+for h in homes():
+    for d in (".ssh", ".kore", ".cc-bridge-dsh", ".gnupg", ".aws"):
+        p = os.path.join(h, d)
+        SECRET_DIRS += [os.path.normpath(p), os.path.realpath(p)]
+DENY_FILES = set()
+for f in A.get("deny_extra") or []:
+    if isinstance(f, str) and f.startswith("/"):
+        DENY_FILES.update((os.path.normpath(f), os.path.realpath(f)))
+SECRET_NAME = re.compile(r"^(id_(rsa|dsa|ecdsa|ed25519).*|.*\.pem|.*\.key|\.?[A-Za-z0-9_-]*\.token"
+                         r"|\.netrc|\.git-credentials|\.pgpass)$")
+def denied(p):
+    for b in SYS_DIRS:
+        if under(p, b):
+            return "系统目录 /proc、/sys、/dev 不允许写"
+    for b in SECRET_DIRS:
+        if under(p, b):
+            return "这个目录存放密钥或凭据（~/.ssh、~/.kore 等），不允许写"
+    if p in DENY_FILES or SECRET_NAME.match(os.path.basename(p)):
+        return "疑似密钥或令牌文件，不允许写"
+    return None
+def roots():
+    pre = A.get("prefix") or ""
+    found = []
+    if isinstance(pre, str) and pre:
+        try:
+            r = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}\t#{pane_current_path}"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+            for ln in r.stdout.decode("utf-8", "surrogateescape").splitlines():
+                nm, _, path = ln.partition("\t")
+                if nm.startswith(pre) and path.startswith("/"):
+                    found.append(path)
+        except Exception:
+            pass
+    h = homes()
+    if h:
+        found.append(h[0])
+    res, seen = [], set()
+    for path in found:
+        rp = os.path.realpath(path)
+        if rp in seen or rp == "/" or denied(rp) or not os.path.isdir(rp):
+            continue
+        seen.add(rp)
+        res.append(rp)
+    return res
+def resolve(raw):
+    # realpath resolves symlinks in the EXISTING prefix even when the leaf does not exist
+    # yet (mkdir / put a new file), so a parent symlink escaping the roots is caught here.
+    if not isinstance(raw, str) or not raw.startswith("/") or "\x00" in raw or len(raw) > 4096:
+        refuse("路径必须是绝对路径")
+    rp = os.path.realpath(raw)
+    for c in (os.path.normpath(raw), rp):
+        why = denied(c)
+        if why:
+            refuse(why)
+    R = roots()
+    hits = [r for r in R if os.path.commonpath([r, rp]) == r]
+    if not hits:
+        refuse("这个路径不在任何 session 的工作目录或主目录之下")
+    return rp, set(R)
+def do_mkdir():
+    rp, _rs = resolve(A.get("path"))
+    if os.path.lexists(rp):
+        err("已存在：" + u(rp))
+    parent = os.path.dirname(rp)
+    if not os.path.isdir(parent):
+        err("父目录不存在：" + u(parent))
+    try:
+        os.mkdir(rp)
+    except OSError as e:
+        err("建目录失败：" + u(e.strerror or str(e)))
+    out({"ok": True, "op": "mkdir", "path": u(rp)})
+def do_rename():
+    rp, rset = resolve(A.get("path"))
+    dp, _ = resolve(A.get("dst"))
+    if rp in rset:
+        refuse("不能重命名根目录")
+    if not os.path.lexists(rp):
+        err("源不存在：" + u(rp))
+    if os.path.lexists(dp):
+        err("目标已存在：" + u(dp))
+    if not os.path.isdir(os.path.dirname(dp)):
+        err("目标父目录不存在：" + u(os.path.dirname(dp)))
+    try:
+        os.rename(rp, dp)
+    except OSError as e:
+        err("重命名失败：" + u(e.strerror or str(e)))
+    out({"ok": True, "op": "rename", "path": u(rp), "dst": u(dp)})
+def do_delete():
+    rp, rset = resolve(A.get("path"))
+    if rp in rset:
+        refuse("不能删除根目录")
+    if not os.path.lexists(rp):
+        err("路径不存在：" + u(rp))
+    try:
+        st = os.lstat(rp)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            os.remove(rp)
+            kind = "file"
+        else:
+            try:
+                os.rmdir(rp)
+                kind = "dir"
+            except OSError:
+                shutil.rmtree(rp)   # hard rm of a non-empty tree (owner's choice)
+                kind = "tree"
+    except OSError as e:
+        err("删除失败：" + u(e.strerror or str(e)))
+    out({"ok": True, "op": "delete", "path": u(rp), "deleted": kind})
+def do_put():
+    rp, _rs = resolve(A.get("path"))
+    parent = os.path.dirname(rp)
+    if not os.path.isdir(parent):
+        err("父目录不存在：" + u(parent))
+    if os.path.isdir(rp):
+        err("这是目录，不能写：" + u(rp))
+    try:
+        data = base64.b64decode((A.get("data") or "").encode("ascii"), validate=True)
+    except Exception:
+        refuse("data 不是合法 base64")
+    append = bool(A.get("append"))
+    try:
+        with open(rp, "ab" if append else "wb") as f:
+            f.write(data)
+        size = os.path.getsize(rp)
+    except OSError as e:
+        err("写文件失败：" + u(e.strerror or str(e)))
+    out({"ok": True, "op": "put", "path": u(rp), "bytes": len(data),
+         "size": int(size), "append": append})
+try:
+    OP = A.get("op")
+    if OP == "mkdir":
+        do_mkdir()
+    elif OP == "rename":
+        do_rename()
+    elif OP == "delete":
+        do_delete()
+    elif OP == "put":
+        do_put()
+    else:
+        refuse("未知的写操作")
+except PermissionError as e:
+    err("没有权限：" + u(str(e)))
+except Exception as e:
+    err("写入失败：" + type(e).__name__ + ": " + u(str(e)))
+'''
+"""The node-side half of the file-browser WRITES. A FIXED program, same contract as
+`_FS_SCRIPT`: input is argv[1] = base64(JSON) of
+`{"op", "path", "dst", "data", "append", "prefix", "deny_extra"}`, output is one
+`<<<KORE-FS>>>{json}` line. `under/denied/roots/resolve` are copied verbatim from
+`_FS_SCRIPT` on purpose — the write policy must never drift from the read policy. Any
+out-of-roots / key path is `refused`; run with `python3 -I` so a planted module cannot
+hijack it."""
+
+
+def _fs_write_cmd(req: dict[str, Any]) -> str:
+    """One shell command for one file WRITE: the fixed write script plus one opaque,
+    quoted base64 argument. Nothing the client sent is ever interpolated."""
+    arg = base64.b64encode(json.dumps(req, ensure_ascii=False).encode("utf-8")).decode("ascii")
+    return f"python3 -I -c {shlex.quote(_FS_WRITE_SCRIPT)} {shlex.quote(arg)}"
+
+
+def _fs_write_exec(br: Any, node_ip: str, req: dict[str, Any]) -> dict[str, Any]:
+    """Child side of write verb "fs": run the fixed WRITE script on the node. Runs inside
+    the resident WRITE agent (same process that owns `session_lock`), so a wedged NFS write
+    costs one job, never the board. The parent has already injected prefix + deny_extra."""
+    br.validate_ip(node_ip)
+    if req.get("op") not in FS_WRITE_OPS:
+        return {"ok": False, "refused": "未知的写操作"}
+    r = br.sh(node_ip, _fs_write_cmd(req), int(policy().get("fs_write_node_timeout_s", 30)))
+    got = _fs_parse(r.get("stdout") or "")
+    if got is None:
+        why = (r.get("stderr") or "").strip()[-300:]
+        return {"ok": False, "error": f"节点上的文件写入脚本没有给出结果（rc={r.get('rc')}）"
+                                      + (f"：{why}" if why else "")}
+    return got
 
 
 def _read_dispatch(kind: str, args: dict[str, Any], br: Any) -> Any:
@@ -699,6 +1281,12 @@ def _read_dispatch(kind: str, args: dict[str, Any], br: Any) -> Any:
                           int(args.get("lines") or 120))
     if kind == "status":
         return br.kore_status(str(args["node_ip"]), str(args["name"]))
+    if kind == "unmanaged":
+        # tmux sessions WITHOUT the prefix, for the "add an existing session" picker.
+        return br.list_unmanaged(str(args["node_ip"]))
+    if kind == "fs":
+        # File browser: one of the fixed ops in `_FS_SCRIPT`, run on the node.
+        return _fs_run(br, str(args["node_ip"]), dict(args.get("req") or {}))
     raise KoreOpsError(f"refused: {kind!r} is not a probe kind")
 
 
@@ -960,6 +1548,11 @@ def _agent_timeout(verb: str, clean: dict[str, Any]) -> float:
         # Same shape of command (has-session && resize-window && capture), same budget,
         # same reason: a browser is waiting to repaint, not to hear about a job.
         return float(pol.get("input_timeout_s", 25.0))
+    if verb == "fs":
+        # One `sh()` running the fixed WRITE script on the node. Must exceed the node-side
+        # budget (fs_write_node_timeout_s, 30s) plus _sh_http's 15s slack, or the parent
+        # would give up before the node's own timeout can report a clean result.
+        return float(pol.get("fs_write_timeout_s", 60.0))
     return float(pol.get("write_timeout_s", 240.0)) + pad
 
 
@@ -1257,6 +1850,9 @@ def _write_agent_child() -> int:
                 res = br.kore_start(ip, name, str(p.get("cwd") or ""), str(p.get("role") or ""))
             elif verb == "stop":
                 res = br.kore_stop(ip, name)
+            elif verb == "adopt":
+                # `name` is the session's CURRENT, unprefixed name; it becomes <prefix><name>.
+                res = br.kore_adopt(ip, name)
             elif verb == "send":
                 res = br.kore_send(ip, name, str(p.get("message") or ""),
                                  bool(p.get("wait", True)), int(p.get("timeout") or 300))
@@ -1266,8 +1862,13 @@ def _write_agent_child() -> int:
                 res = _input_apply(br, ip, name, p)
             elif verb == "resize":
                 res = _resize_apply(br, ip, name, p)
+            elif verb == "fs":
+                # The file-browser write ops. `p` is the full fixed-script request the
+                # parent already validated and stamped with prefix + deny_extra; this child
+                # only runs it on the node (inside the write agent, which owns the bridge).
+                res = _fs_write_exec(br, ip, p)
             else:
-                # Six explicit verbs, never getattr(br, verb): a child that can be told
+                # Explicit verbs, never getattr(br, verb): a child that can be told
                 # which function to call is a new hole, not a fix.
                 res = {"ok": False, "error": f"refused: {verb!r} is not a write verb"}
         except Exception as exc:  # noqa: BLE001 - a failed write is reported, not lost
@@ -1789,6 +2390,152 @@ def _read_cache_put(key: tuple, res: dict[str, Any]) -> None:
         if len(_read_cache) > cap:
             for k, _v in sorted(_read_cache.items(), key=lambda kv: kv[1][0])[:len(_read_cache) - cap]:
                 _read_cache.pop(k, None)
+
+
+def _read_node_gate(node_ip: str) -> None:
+    """The node gate every node-wide read (no session name) goes through: IPv4, not in
+    deny_nodes, currently routable. Raises KoreOpsError (-> 403)."""
+    pol = policy()
+    if not IP_RE.match(node_ip or "") or not all(0 <= int(p) <= 255 for p in node_ip.split(".")):
+        raise KoreOpsError(f"refused: {node_ip!r} is not an IPv4 address")
+    if node_ip in (pol.get("deny_nodes") or []):
+        raise KoreOpsError(f"refused: {node_ip} is in deny_nodes (a node this board must never drive)")
+    if node_ip not in alive_ips():
+        raise KoreOpsError(f"refused: {node_ip} is not a routable node")
+
+
+def unmanaged(node_ip: str) -> dict[str, Any]:
+    """Read-only: tmux sessions on a routable node that do not carry the prefix (the
+    candidates for the `adopt` write). Same node gate as every read; no session name."""
+    _read_node_gate(node_ip)
+    res = _read_call("unmanaged", {"node_ip": node_ip})
+    if not res.get("ok"):
+        return {"ok": False, "node_ip": node_ip, "error": res.get("error") or "read failed"}
+    return {"ok": True, "node_ip": node_ip, "prefix": full_name(""),
+            "sessions": res.get("data") or []}
+
+
+def _fs_path_arg(path: Any) -> str:
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise KoreOpsError("refused: 路径必须是绝对路径")
+    if "\x00" in path or len(path) > 4096:
+        raise KoreOpsError("refused: 路径含非法字符或过长")
+    return path
+
+
+def _fs_call(node_ip: str, req: dict[str, Any]) -> dict[str, Any]:
+    """One file-browser op through the resident read agent. Not audited (a read).
+
+    `{"ok": false, "error"}` for not-found / not-a-dir / permission / a dead or slow node;
+    KoreOpsError for every POLICY refusal, including the ones only the node can decide
+    (outside the roots, /proc, ~/.ssh, key files)."""
+    _read_node_gate(node_ip)
+    res = _read_call("fs", {"node_ip": node_ip, "req": req})
+    if not res.get("ok"):
+        return {"ok": False, "node_ip": node_ip, "error": res.get("error") or "读取失败"}
+    data = res.get("data") if isinstance(res.get("data"), dict) else {}
+    if data.get("refused"):
+        raise KoreOpsError(f"refused: {data['refused']}")
+    if not data.get("ok"):
+        return {"ok": False, "node_ip": node_ip, "error": str(data.get("error") or "读取失败")}
+    return {"ok": True, "node_ip": node_ip, **{k: v for k, v in data.items() if k != "ok"}}
+
+
+def fs_roots(node_ip: str) -> dict[str, Any]:
+    """The browsable roots on a node: each prefixed session's cwd, then $HOME."""
+    return _fs_call(node_ip, {"op": "roots"})
+
+
+def fs_list(node_ip: str, path: str, hidden: bool = False) -> dict[str, Any]:
+    """One directory listing (dirs first, natural sort, capped at 2000)."""
+    return _fs_call(node_ip, {"op": "list", "path": _fs_path_arg(path), "hidden": bool(hidden)})
+
+
+def fs_read(node_ip: str, path: str, tail: int | None = None) -> dict[str, Any]:
+    """One file, capped at 512 KiB (the head, or the tail / last `tail` lines)."""
+    req: dict[str, Any] = {"op": "read", "path": _fs_path_arg(path)}
+    if tail is not None:
+        req["tail"] = max(0, min(1_000_000, int(tail)))
+    return _fs_call(node_ip, req)
+
+
+def fs_readb(node_ip: str, path: str, offset: int = 0, length: int = 0) -> dict[str, Any]:
+    """One byte RANGE of a file as base64 (image preview + download). Read-only, same
+    policy, through the read agent (not audited — it is a read). The browser loops on
+    `offset` to pull a file of any size; one call is capped at 1 MiB on the node."""
+    return _fs_call(node_ip, {"op": "readb", "path": _fs_path_arg(path),
+                              "offset": max(0, int(offset)), "len": max(0, int(length))})
+
+
+def _fs_write_validate(pol: dict[str, Any], op: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Per-op argument checks for a file WRITE. The node's fixed script is the real policy
+    (roots + deny); this is the parent-side shape gate — op enabled in the allowlist, paths
+    absolute (by path, not NAME_RE — the target IS a path), `put` data a legal base64 chunk
+    no larger than `put_chunk_bytes`."""
+    fs = pol.get("fs") or {}
+    if not fs.get("enabled", True):
+        raise KoreOpsError("refused: 文件写操作在 allowlist 里被关掉了（kore.fs.enabled=false）")
+    if op not in FS_WRITE_OPS:
+        raise KoreOpsError(f"refused: {op!r} 不是文件写操作，已知：{', '.join(FS_WRITE_OPS)}")
+    if not (fs.get("ops") or {}).get(op, False):
+        raise KoreOpsError(f"refused: 文件写操作 {op!r} 在 allowlist 里被关掉了")
+    clean: dict[str, Any] = {"op": op, "path": _fs_path_arg(params.get("path"))}
+    if op == "rename":
+        clean["dst"] = _fs_path_arg(params.get("dst"))
+    elif op == "put":
+        data = params.get("data")
+        if not isinstance(data, str):
+            raise KoreOpsError("refused: put 需要一个 base64 字符串 data")
+        try:
+            raw = base64.b64decode(data.encode("ascii"), validate=True)
+        except Exception:  # noqa: BLE001 - binascii.Error / ascii / padding all mean "bad"
+            raise KoreOpsError("refused: put 的 data 不是合法 base64") from None
+        chunk = int(fs.get("put_chunk_bytes", 49152))
+        if len(raw) > chunk:
+            raise KoreOpsError(f"refused: 这一块 {len(raw)}B 超过 put_chunk_bytes {chunk}B "
+                               "（上传不限大小，但要分块发）")
+        clean["data"] = data
+        clean["append"] = bool(params.get("append"))
+        clean["_bytes"] = len(raw)
+    return clean
+
+
+def fs_write(node_ip: str, op: str, params: dict[str, Any], *,
+             who: str = "unknown") -> dict[str, Any]:
+    """One file-browser WRITE (mkdir / rename / delete / put), through the SAME write-agent
+    pipeline as the tmux verbs and with the SAME accountability: every op lands two audit
+    rows (accepted / finished), keyed BY PATH rather than by session name.
+
+    Not a new permission boundary — a WB-token holder can already RCE every node — so the
+    gate here is the node's fixed script (roots + deny on every op), not this parent. A
+    POLICY refusal (out of roots, a key file, op disabled) comes back as KoreOpsError (403);
+    a plain failure (not found, permission, father missing) as `{"ok": false, "error"}`."""
+    pol = policy()
+    _read_node_gate(node_ip)        # IPv4 + deny_nodes + routable, same as every read
+    clean = _fs_write_validate(pol, op, params)
+    base = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "at_epoch": time.time(),
+            "verb": "fs", "op": op, "who": who, "node_ip": node_ip, "path": clean["path"]}
+    if op == "rename":
+        base["dst"] = clean["dst"]
+    if op == "put":
+        base["bytes"] = clean.get("_bytes", 0)
+        base["append"] = clean.get("append", False)
+    # prefix + deny_extra injected here (like _fs_run), so the node recomputes roots and the
+    # WB-token file is denied even to a write. The `_`-prefixed audit-only keys never travel.
+    req = {k: v for k, v in clean.items() if not k.startswith("_")}
+    req["prefix"] = getattr(bridge(), "TMUX_PREFIX", "kore-")
+    extra = [os.environ.get("WB_TOKEN_FILE") or "", os.path.join(HERE, "workbench", ".token")]
+    req["deny_extra"] = [p for p in extra if p.startswith("/")]
+    _audit({**base, "action": "accepted"})
+    res = _agent_call("fs", node_ip, "", req)
+    ok = bool(res.get("ok"))
+    refused = res.get("refused")
+    _audit({**base, "action": "finished", "ok": ok,
+            "error": "" if ok else str(res.get("error") or refused or "")[:500]})
+    if refused:
+        raise KoreOpsError(f"refused: {refused}")
+    return {"ok": ok, "node_ip": node_ip,
+            **{k: v for k, v in res.items() if k not in ("ok", "agent")}}
 
 
 def read_verb(verb: str, node_ip: str, name: str, *, who: str = "unknown",

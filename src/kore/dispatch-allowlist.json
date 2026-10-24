@@ -18,7 +18,12 @@
       "working. The mechanism lives in koreops.py `_validate()`; this list only decides WHO",
       "it applies to. Empty by default — add a session name to make it read-only.",
       "cwd_roots: a new session's working directory must sit under one of these prefixes.",
-      "allowed_keys: the named keys `kore_keys` may send (free-text goes through send/input)."
+      "allowed_keys: the named keys `kore_keys` may send (free-text goes through send/input).",
+      "fs: file-browser WRITES. enabled + per-op switches gate mkdir/rename/delete/put; the",
+      "node's fixed script re-checks roots+deny on every op, so this is the on/off, not the",
+      "boundary. put_chunk_bytes is NOT a size cap (uploads are unlimited, sent as many put",
+      "chunks) — it is the per-chunk raw-byte budget that keeps the whole `sh -c` command",
+      "under MAX_ARG_STRLEN (128KiB per execve arg). Delete is a HARD rm (no trash)."
     ],
     "enabled": true,
     "nodes": ["*"],
@@ -27,6 +32,11 @@
     "protected_sessions": [],
     "allowed_keys": ["Enter", "Escape", "Up", "Down", "Tab", "BSpace", "C-c"],
     "cwd_roots": ["/data", "/root", "/tmp", "/home"],
+    "fs": {
+      "enabled": true,
+      "ops": {"mkdir": true, "rename": true, "delete": true, "put": true},
+      "put_chunk_bytes": 49152
+    },
     "max_message_bytes": 16384,
     "max_per_minute": 20,
     "read_cache_s": 0.5,
