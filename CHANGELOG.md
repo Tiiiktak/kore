@@ -6,6 +6,15 @@ All notable changes to **kore** are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-10-25
+
+### Added
+- **Terminal connecting animation.** While a pane connects, the terminal shows the kore
+  brand mark with a diagonal "pixel wave" (each sub-pixel breathes offset by its position,
+  looping a light sweep across the mark), a Claude-tint glow, and a faint "Connecting…" —
+  instead of a blank dark box. Delayed 0.3s so a fast local connect never flashes it, and
+  torn down on the first real frame.
+
 ## [0.5.1] — 2026-10-25
 
 ### Added
