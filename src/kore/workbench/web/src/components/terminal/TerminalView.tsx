@@ -3,21 +3,12 @@ import '@xterm/xterm/css/xterm.css'
 import { createKoreTerminal, type KoreTerminal } from '@/lib/term/terminal'
 import { MobileInput } from './MobileInput'
 import { useKeyboardInset } from '@/hooks/useKeyboardInset'
+import { BrandMark } from '@/components/BrandMark'
 
 // Mounts the imperative terminal engine into a ref'd host. Keyed by winId upstream so the host
 // survives re-renders (layout changes only reposition it). `focused` gates keyboard input;
 // fit is debounced so split/sash drags don't spam the backend with resize calls. On mobile a
 // compose box + key row (MobileInput) is attached, and the key row floats above the soft keyboard.
-// The kore brand mark as vector sub-pixels (same shape as the favicon / top-left logo).
-// Each [x, y] is a 1×2 cell; the loader animates them with a diagonal phase offset (x+y) so a
-// wave of light sweeps across the mark and loops seamlessly.
-const LOADER_MARK: ReadonlyArray<readonly [number, number]> = [
-  [2, 0], [3, 0], [4, 0], [5, 0], [6, 0], [7, 0],
-  [2, 2], [3, 2], [6, 2], [7, 2],
-  [0, 4], [1, 4], [2, 4], [3, 4], [4, 4], [5, 4],
-  [2, 6], [3, 6],
-]
-
 export function TerminalView({
   nodeIp,
   name,
@@ -94,24 +85,11 @@ export function TerminalView({
             className="pointer-events-none absolute inset-0 z-[1] flex flex-col items-center justify-center gap-4 [animation:termLoadIn_.2s_ease_.3s_both]"
             style={{ transform: 'translateY(-5%)' }}
           >
-            <svg
-              viewBox="0 0 8 8"
+            <BrandMark
+              animate="loop"
               className="size-11 text-[var(--claude)] select-none"
-              fill="currentColor"
-              shapeRendering="crispEdges"
               style={{ filter: 'drop-shadow(0 0 7px color-mix(in oklch, var(--claude) 60%, transparent))' }}
-            >
-              {LOADER_MARK.map(([x, y], i) => (
-                <rect
-                  key={i}
-                  x={x}
-                  y={y}
-                  width="1"
-                  height="2"
-                  style={{ animation: 'termPixelWave 1.5s ease-in-out infinite', animationDelay: `${((x + y) * 0.06).toFixed(2)}s` }}
-                />
-              ))}
-            </svg>
+            />
             <div className="text-muted-foreground text-[10px] font-medium tracking-[0.3em] uppercase">Connecting…</div>
           </div>
         )}

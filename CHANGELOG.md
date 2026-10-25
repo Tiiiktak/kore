@@ -6,6 +6,61 @@ All notable changes to **kore** are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-10-26
+
+### Added
+- **Upgrade & restart from the dashboard.** Settings shows the installed build with 检查更新
+  (TTL-cached `GET /api/kore/latest`, proxy-aware) and a two-step 升级并重启. Each machine on
+  the overview can be restarted or upgraded from a confirm popover — the server drives it on a
+  client over the agent `/exec` fence with a fixed, `setsid`-detached command, WB-gated by a
+  node-shaped `confirm` plus a `kore.node_actions` policy toggle and an audit row. A
+  "重启中… → 已重启 ✓" badge watches the agent's `started_at` to confirm it really bounced.
+  Pinned install / rollback and an **upgrade proxy** (for intranet nodes that can't reach
+  github.com; saved to `~/.kore/config.json`, 0600) live under 设置 → 高级.
+- **The overview is a dashboard.** Full-width, a KPI row (总会话 / 需回复 / 运行中 / 机器), a
+  flat look (shadows dropped), flexible card columns with the session name emphasized and its
+  original prefixed name shown, a terminal glyph in place of the colored tile, per-machine
+  system metrics (负载 / 内存 / 磁盘 / GPU via a light `GET /api/kore/sysinfo` on its own
+  cadence) and a "版本落后" badge. The whole page scrolls as one (mobile-friendly).
+- **First-paint loader.** The HTML→JS gap now shows the brand mark with a pure-CSS pixel wave
+  (and the themed background) instead of a white flash; torn down when React mounts.
+- **Favicon + a shared `BrandMark`.** The brand mark is one component reused by the top-bar
+  logo (hover sweep), the terminal connecting loader, and the favicon.
+- **Split button hovers open.** Hovering a window's split button floats out 左右/上下分屏
+  (no click needed); a direction that lacks room is disabled.
+- **The new-window picker follows the workspace.** When the workspace already holds a
+  terminal, the empty-window picker shows a "联动 ‹session›·‹机器›" banner and leans toward
+  it: same-machine sessions first, a "在 ‹机器› 新建会话" shortcut (started in the sibling
+  terminal's current directory and filled into the window once it appears), and the files tab
+  defaults to that machine with an "打开当前终端目录" shortcut. The current directory comes
+  from the session's live `pane_current_path` (via the fs roots), not the stale create-time
+  value.
+
+### Fixed
+- **"需要你" was laggy.** The dashboard polled the 120s-cached cluster roster, so a waiting
+  session could take ~2 min to light up — worse for client sessions, which keep no hook file
+  and rely on the pane scraper that only runs inside that scan. The cluster sweep is ~0.25s on
+  a healthy fleet, so its TTL is now 6s (was 120s) and the poll 6s (was 10s): "需要你" surfaces
+  within seconds for every session.
+- **An actively-working session could show idle.** A frozen hook record (stuck at
+  `SessionStart`) was trusted over a clearly-busy pane; the scraper may now correct a stale
+  `idle → busy` (in addition to the existing `idle → waiting` menu upgrade).
+- **Agent restart was invisible.** The register door read `started_at` / `pid` but never
+  stored them, and a "preserve" line pinned the first value — so a restart could never be
+  confirmed. They are stored now and the agent's reported value is trusted (last-known only as
+  a fallback), which also drives the overview's restart confirmation and version column.
+- **Terminal recovery.** A tap drop after data (a server/agent restart) now re-subscribes with
+  backoff instead of freezing on "对面结束了", and the version string rides the roster poll so
+  it refreshes itself after an upgrade+restart.
+- **"需要你" didn't clear when handled.** Opening a waiting session, or typing into it, now
+  optimistically clears its blink until the next roster read reconciles.
+- **tmux target matched by prefix.** `has_session` used `tmux has-session -t <name>`, which
+  matches by PREFIX — so creating `kore-test` was wrongly refused as "already exists" (it hit
+  an existing `kore-test-hook`), and `send`/`stop` could act on the wrong session. Now an
+  exact `-t =<name>` target (with a regression test).
+- A failed `start` (name taken, node unreachable, …) now surfaces its real error in the
+  new-window picker instead of hanging silently on "启动中…".
+
 ## [0.5.3] — 2026-10-25
 
 ### Added

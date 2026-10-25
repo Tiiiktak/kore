@@ -1,10 +1,9 @@
 import { useRef, useState } from 'react'
-import { Star, Trash2 } from 'lucide-react'
+import { Star, TerminalSquare, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { kPost } from '@/lib/api'
 import { StatusDot } from '@/components/StatusDot'
-import { SessionIcon } from '@/components/SessionIcon'
-import { sessIconBg, sessKey, sessName, stateLabel } from '@/lib/kore'
+import { sessKey, sessName, stateLabel } from '@/lib/kore'
 import type { Labels, Session } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
@@ -59,7 +58,8 @@ export function SessionCard({
   }
   const id = sessKey(s)
   const name = sessName(s, labels, prefix)
-  const real = labels.sessions[id]?.name ? s.name : ''
+  // always surface the original tmux name (prefix kept) when it differs from what we show
+  const real = s.name !== name ? s.name : ''
   const lock = s.protected ? '受保护' : !s.writable ? '不可写' : ''
   const summary = (s.summary || '')
     .split('\n')
@@ -74,7 +74,7 @@ export function SessionCard({
       tabIndex={0}
       onClick={() => onOpen(s)}
       onKeyDown={(e) => e.key === 'Enter' && onOpen(s)}
-      className="group bg-card hover:border-ring/40 relative flex h-[128px] cursor-pointer flex-col rounded-lg border p-3 text-left shadow-sm transition-colors"
+      className="group bg-card hover:border-ring/40 relative flex h-[128px] cursor-pointer flex-col rounded-lg border p-3 text-left transition-colors"
     >
       <div className="flex items-center gap-2">
         <StatusDot state={st} />
@@ -85,11 +85,11 @@ export function SessionCard({
           }}
           title="改备注名"
           aria-label="改备注名"
-          className="shrink-0 rounded-[7px] hover:opacity-80"
+          className="text-muted-foreground hover:text-foreground shrink-0 rounded"
         >
-          <SessionIcon bg={sessIconBg(s.name, prefix)} size={22} />
+          <TerminalSquare className="size-[18px]" />
         </button>
-        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold">
+        <span className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-tight">
           {name}
           {real && <span className="text-muted-foreground ml-1 text-[11px] font-normal">{real}</span>}
         </span>

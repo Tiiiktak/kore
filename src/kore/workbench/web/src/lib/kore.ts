@@ -12,6 +12,20 @@ export const STATE_LABEL: Record<string, string> = {
 }
 export const stateLabel = (st: string) => STATE_LABEL[st] || st || ''
 
+// Compare two kore version strings ("v0.5.3" / "0.5.3"). Returns true iff a < b numerically.
+// A non-semver string (dev build, "?", missing) is treated as not-older so it never nags.
+export function versionLt(a?: string, b?: string): boolean {
+  const parse = (v?: string) => {
+    const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec((v || '').trim())
+    return m ? [+m[1], +m[2], +m[3]] : null
+  }
+  const pa = parse(a)
+  const pb = parse(b)
+  if (!pa || !pb) return false
+  for (let i = 0; i < 3; i++) if (pa[i] !== pb[i]) return pa[i] < pb[i]
+  return false
+}
+
 export const stripPrefix = (name: string, prefix: string) =>
   prefix && name.startsWith(prefix) ? name.slice(prefix.length) : name
 
@@ -48,6 +62,7 @@ export interface NodeView {
   self: boolean
   hostname: string
   color: string
+  agentStarted?: number
 }
 
 export function buildNodes(nodes: NodeInfo[]): Record<string, NodeView> {
@@ -58,6 +73,7 @@ export function buildNodes(nodes: NodeInfo[]): Record<string, NodeView> {
       self: !!n.self,
       hostname: n.hostname || '',
       color: nodeColor(n.node_ip, !!n.self),
+      agentStarted: n.agent_started,
     }
   return out
 }

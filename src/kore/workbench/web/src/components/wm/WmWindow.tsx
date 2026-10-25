@@ -1,12 +1,6 @@
 import { useState } from 'react'
 import { ChevronDown, Columns2, RotateCw, Rows2, SquareSplitHorizontal, X } from 'lucide-react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
 import { TerminalView } from '@/components/terminal/TerminalView'
 import { BrowserView } from './BrowserView'
 import { FilesView } from './FilesView'
@@ -28,7 +22,7 @@ export function WmWindow({ rect, active, mobile = false }: { rect: Rect; active:
 
   return (
     <div
-      className="absolute flex flex-col overflow-hidden rounded-lg [animation:winIn_.2s_ease-out]"
+      className="absolute flex flex-col overflow-hidden rounded-lg"
       style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
       onPointerDownCapture={() => wmStore.focus(rect.win)}
     >
@@ -62,25 +56,35 @@ export function WmWindow({ rect, active, mobile = false }: { rect: Rect; active:
             <RotateCw className="size-4" />
           </button>
         )}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-6 items-center justify-center rounded-md"
-              aria-label="分屏"
-              title="分屏"
-            >
-              <SquareSplitHorizontal className="size-4" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem disabled={!canRow} onSelect={() => wmStore.split(rect.win, 'row')}>
-              <Columns2 /> 左右分屏 {!canRow && <span className="text-muted-foreground ml-auto text-xs">空间不足</span>}
-            </DropdownMenuItem>
-            <DropdownMenuItem disabled={!canCol} onSelect={() => wmStore.split(rect.win, 'col')}>
-              <Rows2 /> 上下分屏 {!canCol && <span className="text-muted-foreground ml-auto text-xs">空间不足</span>}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {/* split: hover the button to float out the two directions — no click needed. The
+            wrapper's `pt-1` bridges the gap to the button so the hover never drops. */}
+        <div className="group/split relative">
+          <button
+            className="text-muted-foreground group-hover/split:bg-accent group-hover/split:text-foreground flex size-6 items-center justify-center rounded-md"
+            aria-label="分屏"
+            title="分屏"
+          >
+            <SquareSplitHorizontal className="size-4" />
+          </button>
+          <div className="invisible absolute top-full right-0 z-20 -translate-y-1 pt-1 opacity-0 transition-[opacity,transform] duration-150 group-hover/split:visible group-hover/split:translate-y-0 group-hover/split:opacity-100">
+            <div className="bg-popover ring-foreground/10 flex flex-col gap-0.5 rounded-lg p-1 shadow-md ring-1">
+              <button
+                disabled={!canRow}
+                onClick={() => wmStore.split(rect.win, 'row')}
+                className="hover:bg-accent flex items-center gap-1.5 rounded-md px-2 py-1 text-sm whitespace-nowrap disabled:pointer-events-none disabled:opacity-50"
+              >
+                <Columns2 className="size-4" /> 左右分屏
+              </button>
+              <button
+                disabled={!canCol}
+                onClick={() => wmStore.split(rect.win, 'col')}
+                className="hover:bg-accent flex items-center gap-1.5 rounded-md px-2 py-1 text-sm whitespace-nowrap disabled:pointer-events-none disabled:opacity-50"
+              >
+                <Rows2 className="size-4" /> 上下分屏
+              </button>
+            </div>
+          </div>
+        </div>
         <button
           onClick={() => wmStore.close(rect.win)}
           className="text-muted-foreground hover:bg-[var(--bad-bg,var(--accent))] hover:text-[var(--bad)] flex size-6 items-center justify-center rounded-md"

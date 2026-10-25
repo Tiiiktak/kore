@@ -135,9 +135,23 @@ def test_dashboard_version():
     print(f"ok  dashboard reads its version without importing the package ({got})")
 
 
+def test_has_session_exact_match():
+    """has_session must target tmux with `=` (EXACT), not a bare name (PREFIX). A bare
+    `tmux has-session -t kore-test` matches an existing `kore-test-hook`, so `start` falsely
+    reports "already exists" and `send`/`stop` would act on the WRONG session (2026-10-25)."""
+    import ast
+    src = open(os.path.join(HERE, "kore-bridge.py"), encoding="utf-8").read()
+    fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "has_session")
+    body = ast.get_source_segment(src, fn) or ""
+    assert "has-session -t =" in body, "has_session must use an exact `-t =<name>` target"
+    assert "has-session -t {name}" not in body, "has_session must not use a bare (prefix) target"
+    print("ok  has_session uses tmux exact-match target")
+
+
 if __name__ == "__main__":
     test_child_env_propagates()
     test_registry_readers()
     test_routing()
     test_dashboard_version()
+    test_has_session_exact_match()
     print("\nall routing tests passed")

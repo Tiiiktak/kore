@@ -345,6 +345,67 @@ def node_hook_states(node_ip: str) -> dict[str, dict]:
     return out
 
 
+# System metrics for the overview dashboard: load / cpu / mem / disk / gpu, collected in ONE
+# round trip per node (same shape as node_hook_states). Everything is best-effort — a missing
+# file or tool just omits that field, never fails the call. $HOME picks the disk the user's
+# sessions actually live on. nvidia-smi is optional (no GPU / not installed -> empty list).
+_SYS_METRICS_CMD = (
+    'echo "LOAD $(cat /proc/loadavg 2>/dev/null)"; '
+    'echo "CPUS $(nproc 2>/dev/null || echo 0)"; '
+    'echo "MEM $(awk \'/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print t, a}\' /proc/meminfo 2>/dev/null)"; '
+    'echo "DISK $(df -P -k "$HOME" 2>/dev/null | awk \'NR==2{print $3, $2}\')"; '
+    'echo "KVER $(kore --version 2>/dev/null | awk \'{print $NF}\')"; '
+    'echo GPU_START; '
+    'nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total '
+    '--format=csv,noheader,nounits 2>/dev/null; echo GPU_END')
+
+
+def node_system_metrics(node_ip: str) -> dict:
+    """One node's {load1/5/15, cpus, mem_used_kb, mem_total_kb, disk_used_kb, disk_total_kb,
+    gpus:[{util,mem_used,mem_total}]} in a single sh(). {} (not an error) when unreachable."""
+    try:
+        r = sh(node_ip, _SYS_METRICS_CMD, 15)
+    except Exception:  # noqa: BLE001 - a slow/absent node must not break the whole sweep
+        return {}
+    out: dict = {}
+    gpus: list[dict] = []
+    in_gpu = False
+    for line in (r.get("stdout") or "").splitlines():
+        line = line.strip()
+        if line == "GPU_START":
+            in_gpu = True
+            continue
+        if line == "GPU_END":
+            in_gpu = False
+            continue
+        if in_gpu:
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) == 3:
+                try:
+                    gpus.append({"util": int(float(parts[0])), "mem_used": int(float(parts[1])),
+                                 "mem_total": int(float(parts[2]))})
+                except ValueError:
+                    pass
+            continue
+        tag, _, rest = line.partition(" ")
+        f = rest.split()
+        try:
+            if tag == "LOAD" and len(f) >= 3:
+                out["load1"], out["load5"], out["load15"] = (float(f[0]), float(f[1]), float(f[2]))
+            elif tag == "CPUS" and f:
+                out["cpus"] = int(f[0])
+            elif tag == "MEM" and len(f) >= 2:
+                out["mem_total_kb"], out["mem_avail_kb"] = int(f[0]), int(f[1])
+            elif tag == "DISK" and len(f) >= 2:
+                out["disk_used_kb"], out["disk_total_kb"] = int(f[0]), int(f[1])
+            elif tag == "KVER" and f:
+                out["kore_version"] = f[0]
+        except ValueError:
+            pass
+    out["gpus"] = gpus
+    return out
+
+
 def _read_hook_state(node_ip: str, name: str) -> dict | None:
     try:
         r = sh(node_ip, f"cat {_AGENT_STATE_GLOB}/{name}.json 2>/dev/null || true", 15)
@@ -369,12 +430,20 @@ def session_state(node_ip: str, name: str, pane: str,
     rec = states.get(name) if states is not None else _read_hook_state(node_ip, name)
     st = rec.get("state") if rec else None
     if st in ("busy", "waiting", "idle"):
-        # A visible choice menu (AskUserQuestion) is an unambiguous "需要人回复" even while the
-        # hook still reads busy (an in-turn question keeps the hook on busy) or idle (a Stop
-        # fired with the menu left up). The scraper CAN see the menu, so let it upgrade
-        # busy/idle -> waiting. A finished idle prompt scrapes as idle, so it stays idle.
-        if st != "waiting" and pane_state(pane) == "waiting":
+        ps = pane_state(pane)
+        # Hooks fire only on transitions, so a missed one freezes the record. The scraper can
+        # correct it in the two directions it provably gets right:
+        #   idle/busy -> waiting: a choice/permission menu (AskUserQuestion) is up. The hook may
+        #     still read busy (an in-turn question) or idle (a Stop fired with the menu left up).
+        if st != "waiting" and ps == "waiting":
             return "waiting"
+        #   idle -> busy: a live spinner is running, so Claude is plainly working even though the
+        #     last hook we saw was idle — e.g. a long turn whose UserPromptSubmit/Stop hook never
+        #     fired, or an adopted / pre-hook session frozen at SessionStart. A finished prompt
+        #     scrapes as idle (past-tense marker, no live spinner), so this never makes a done
+        #     session look busy.
+        if st == "idle" and ps == "busy":
+            return "busy"
         return st
     return pane_state(pane)   # ended / missing / unparsable -> fall back to scraping
 
@@ -394,7 +463,11 @@ def mark_busy(node_ip: str, name: str) -> None:
 
 
 def has_session(node_ip: str, name: str) -> bool:
-    r = sh(node_ip, f"tmux has-session -t {name} 2>/dev/null && echo YES || echo NO", 20)
+    # `=` forces an EXACT match. Without it tmux treats the target as a PREFIX, so
+    # `has-session -t kore-test` matches an existing `kore-test-hook` — which both falsely
+    # reports "already exists" on start and would let send/stop act on the WRONG session.
+    # `name` is norm_name'd (SESSION_NAME_RE: letters/digits/-/_), so it needs no quoting.
+    r = sh(node_ip, f"tmux has-session -t ={name} 2>/dev/null && echo YES || echo NO", 20)
     return "YES" in r["stdout"]
 
 
@@ -589,10 +662,14 @@ def job_map(force: bool = False) -> dict[str, dict[str, Any]]:
         host = (socket.gethostname() if is_self
                 else str((reg.get(ip) or {}).get("hostname") or ""))
         # `self` / `hostname` let the dashboard say WHICH machine a session lives on: the
-        # server's own host, or a client (by its hostname).
+        # server's own host, or a client (by its hostname). `agent_started` / `pid` come from
+        # the client's register record (None for self) — the dashboard watches `agent_started`
+        # change to confirm a "restart agent" actually bounced the process.
+        rec = reg.get(ip) or {}
         out[ip] = {"job_name": "", "job_id": "", "user": "", "gpus": 0, "nnode": 0,
                    "status": "", "alive": True, "cpus": 0,
-                   "self": is_self, "hostname": host}
+                   "self": is_self, "hostname": host,
+                   "agent_started": rec.get("started_at"), "pid": rec.get("pid")}
     return out
 
 

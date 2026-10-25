@@ -91,6 +91,87 @@ export async function kFsReadB(
   return apiGet<ReadBResp>('/api/kore/fs/readb?' + qs)
 }
 
+// ---- version + node lifecycle (production ops) -----------------------------------------
+export interface LatestResp {
+  ok: boolean
+  current: string
+  latest: string
+  outdated: boolean
+  source?: string
+  error?: string
+}
+
+// Installed build vs. newest release on the remote. `force` re-checks past the server cache.
+export const kLatest = (force = false): Promise<LatestResp> =>
+  apiGet<LatestResp>('/api/kore/latest' + (force ? '?force=1' : ''))
+
+// A node lifecycle action. target 'server' acts on this board (confirm `server-<action>`);
+// target 'node' acts on a client (confirm `node-<action>:<node_ip>`, node_ip required). The
+// command is built server-side; we only name the target. May return 'dispatched' as the agent
+// is replaced mid-call — the caller then polls the roster for the node to come back.
+export async function kNode<T = unknown>(
+  target: 'server' | 'node',
+  action: 'restart' | 'upgrade',
+  opts: { node_ip?: string; version?: string } = {},
+): Promise<T> {
+  const confirm = target === 'server' ? `server-${action}` : `node-${action}:${opts.node_ip ?? ''}`
+  const r = await fetch(`/api/kore/${target}/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ ...opts, confirm }),
+  })
+  const d = await r.json().catch(() => ({ error: 'HTTP ' + r.status }))
+  if (!r.ok) throw new Error((d as any).refused || (d as any).error || 'HTTP ' + r.status)
+  return d as T
+}
+
+// ---- per-node system metrics (overview monitoring) -------------------------------------
+export interface GpuMetric {
+  util: number
+  mem_used: number
+  mem_total: number
+}
+export interface NodeMetrics {
+  load1?: number
+  load5?: number
+  load15?: number
+  cpus?: number
+  mem_total_kb?: number
+  mem_avail_kb?: number
+  disk_used_kb?: number
+  disk_total_kb?: number
+  gpus?: GpuMetric[]
+  kore_version?: string
+}
+export interface SysinfoResp {
+  ok: boolean
+  at: number
+  nodes: Record<string, NodeMetrics>
+}
+
+export const kSysinfo = (force = false): Promise<SysinfoResp> =>
+  apiGet<SysinfoResp>('/api/kore/sysinfo' + (force ? '?force=1' : ''))
+
+// ---- platform config (the upgrade proxy, editable from the dashboard) ------------------
+export interface KoreConfig {
+  upgrade_proxy: string
+  no_proxy: string
+}
+
+export const kConfigGet = (): Promise<{ ok: boolean; config: KoreConfig }> =>
+  apiGet('/api/kore/config')
+
+export async function kConfigSet(updates: Partial<KoreConfig>): Promise<KoreConfig> {
+  const r = await fetch('/api/kore/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(updates),
+  })
+  const d = await r.json().catch(() => ({ error: 'HTTP ' + r.status }))
+  if (!r.ok) throw new Error((d as any).refused || (d as any).error || 'HTTP ' + r.status)
+  return (d as any).config as KoreConfig
+}
+
 // Token appended for transports that cannot set a header (EventSource / WebSocket).
 export const withToken = (path: string): string =>
   TOKEN ? path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN) : path

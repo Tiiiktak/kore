@@ -37,11 +37,15 @@
       "ops": {"mkdir": true, "rename": true, "delete": true, "put": true},
       "put_chunk_bytes": 49152
     },
+    "node_actions": {
+      "enabled": true,
+      "actions": {"restart": true, "upgrade": true}
+    },
     "max_message_bytes": 16384,
     "max_per_minute": 20,
     "read_cache_s": 0.5,
     "roster_ttl_s": 20.0,
-    "cluster_ttl_s": 120.0,
+    "cluster_ttl_s": 6.0,
     "send_timeout_s": 300,
     "job_keep": 200
   }

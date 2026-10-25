@@ -12,9 +12,10 @@ export interface RosterState {
 }
 
 // Reads /api/kore/roster. First load uses the cached cluster scan (fast); the refresh button
-// forces a real re-scan (force=1). A light 10s poll keeps the cached view fresh without
-// forcing per-node round trips (matches the old board's kTick cadence).
-export function useRoster(pollMs = 10_000): RosterState {
+// forces a real re-scan (force=1). A ~6s poll keeps the view fresh — the cluster sweep carries
+// every session's live state, so this cadence (with the short cluster_ttl_s) is what makes the
+// "需要你" indicator responsive instead of lagging minutes behind.
+export function useRoster(pollMs = 6_000): RosterState {
   const [roster, setRoster] = useState<Roster | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)

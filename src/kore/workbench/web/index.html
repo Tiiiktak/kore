@@ -14,9 +14,59 @@
           document.documentElement.classList.add('dark')
       } catch (e) {}
     </script>
+    <!-- Boot screen — the HTML→JS gap (before React mounts) would otherwise be a white flash.
+         Pure CSS so it paints on first frame, before Tailwind/main.tsx load; createRoot()
+         clears #root on mount, so the loader removes itself. Mirrors the terminal connecting
+         loader: the same brand mark (same shape as the favicon) with the termPixelWave sweep.
+         The bg colors match index.css :root/.dark --background so dark users get no white flash. -->
+    <style>
+      html { background: #f5f5f7; }
+      html.dark { background: #0d1117; }
+      #kore-boot {
+        position: fixed; inset: 0; z-index: 2147483647;
+        display: flex; align-items: center; justify-content: center;
+        animation: koreBootIn 0.2s ease 0.18s both;
+      }
+      #kore-boot svg {
+        width: 44px; height: 44px; color: #d77757;
+        filter: drop-shadow(0 0 7px color-mix(in oklch, #d77757 60%, transparent));
+      }
+      html.dark #kore-boot svg { color: #e0a080; }
+      #kore-boot rect { fill: currentColor; animation: koreBootWave 1.5s ease-in-out infinite; }
+      @keyframes koreBootWave { 0%, 100% { opacity: 0.16; } 50% { opacity: 1; } }
+      @keyframes koreBootIn { from { opacity: 0; } to { opacity: 1; } }
+      @media (prefers-reduced-motion: reduce) {
+        #kore-boot { animation: none; }
+        #kore-boot rect { animation: none; opacity: 1; }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- shown instantly; React clears #root (and this) on first paint -->
+      <div id="kore-boot" aria-hidden="true">
+        <svg viewBox="0 0 8 8" shape-rendering="crispEdges">
+          <rect x="2" y="0" width="1" height="2" style="animation-delay:.10s" />
+          <rect x="3" y="0" width="1" height="2" style="animation-delay:.15s" />
+          <rect x="4" y="0" width="1" height="2" style="animation-delay:.20s" />
+          <rect x="5" y="0" width="1" height="2" style="animation-delay:.25s" />
+          <rect x="6" y="0" width="1" height="2" style="animation-delay:.30s" />
+          <rect x="7" y="0" width="1" height="2" style="animation-delay:.35s" />
+          <rect x="2" y="2" width="1" height="2" style="animation-delay:.20s" />
+          <rect x="3" y="2" width="1" height="2" style="animation-delay:.25s" />
+          <rect x="6" y="2" width="1" height="2" style="animation-delay:.40s" />
+          <rect x="7" y="2" width="1" height="2" style="animation-delay:.45s" />
+          <rect x="0" y="4" width="1" height="2" style="animation-delay:.20s" />
+          <rect x="1" y="4" width="1" height="2" style="animation-delay:.25s" />
+          <rect x="2" y="4" width="1" height="2" style="animation-delay:.30s" />
+          <rect x="3" y="4" width="1" height="2" style="animation-delay:.35s" />
+          <rect x="4" y="4" width="1" height="2" style="animation-delay:.40s" />
+          <rect x="5" y="4" width="1" height="2" style="animation-delay:.45s" />
+          <rect x="2" y="6" width="1" height="2" style="animation-delay:.40s" />
+          <rect x="3" y="6" width="1" height="2" style="animation-delay:.45s" />
+        </svg>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

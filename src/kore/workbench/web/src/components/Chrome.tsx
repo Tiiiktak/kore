@@ -2,6 +2,8 @@ import { Home, PanelLeft } from 'lucide-react'
 import { SettingsMenu } from '@/components/SettingsMenu'
 import { WorkspaceTabs } from '@/components/wm/WorkspaceTabs'
 import { toggleTabSide } from '@/lib/layout'
+import { flipCapture } from '@/lib/wm/flip'
+import { BrandMark } from '@/components/BrandMark'
 import { useWmVersion, wmStore } from '@/lib/wm/store'
 import { useRosterCtx } from '@/lib/roster-context'
 import { effectiveState, useSeenVersion } from '@/lib/seen'
@@ -16,67 +18,56 @@ import { cn } from '@/lib/utils'
 export function Chrome({ version, orientation }: { version?: string; orientation: 'top' | 'left' }) {
   useWmVersion()
   useSeenVersion()
-  const { roster } = useRosterCtx()
+  const { roster, fetchedAt } = useRosterCtx()
   const mobile = useIsMobile()
   const left = orientation === 'left'
   const home = wmStore.get().view === 'home'
-  const needsYou = !!roster?.sessions?.some((s) => s.state === 'waiting')
   const visible = wmStore.visibleSessionKeys()
-  const doneSomewhere = !needsYou && !!roster?.sessions?.some((s) => effectiveState(s, visible) === 'done')
+  // via effectiveState so "已处理即消闪" (markActed) also quiets the sidebar alert, not just cards
+  const needsYou = !!roster?.sessions?.some((s) => effectiveState(s, visible, fetchedAt) === 'waiting')
+  const doneSomewhere = !needsYou && !!roster?.sessions?.some((s) => effectiveState(s, visible, fetchedAt) === 'done')
 
   return (
     <nav
-      key={orientation}
       className={cn(
-        'bg-background flex shrink-0 [animation:navIn_.22s_ease-out]',
-        left ? 'w-[228px] flex-col gap-1 border-r p-2' : 'h-[46px] items-center gap-2 border-b px-2',
+        // No background / border: the nav is just a transparent container over the one shared
+        // background. Only the controls inside move (FLIP) when the side flips.
+        'absolute top-0 left-0 z-10 flex',
+        left ? 'h-full w-[228px] flex-col gap-1 p-2' : 'h-[46px] w-full items-center gap-2 px-2',
       )}
     >
       {/* leading: brand mark flush-left, then the wordmark, then the layout toggle (desktop) */}
-      <div className={cn('flex items-center gap-1.5', left && 'pb-0.5')}>
+      {/* logo + wordmark + toggle each FLIP individually: the cluster's own box barely moves,
+          but the left-only pl-2.5 indent shifts the glyphs INSIDE it — a container-level FLIP
+          can't see that, so each element carries its own key and slides to its real position. */}
+      <div className={cn('flex items-center gap-1.5', left && 'pb-0.5 pl-2.5')}>
         {/* brand mark: the ▐▛▜▌/▝▜▛▘ quadrant glyphs as vector sub-pixels (square, crisp,
             theme-aware via currentColor) — same shape as the favicon. */}
-        <svg
-          viewBox="0 0 8 8"
+        <BrandMark
+          data-flip="nav-logo"
+          animate="hover"
           className="size-[18px] shrink-0 text-[var(--claude)] select-none"
-          fill="currentColor"
-          shapeRendering="crispEdges"
-          aria-hidden="true"
-        >
-          <rect x="2" y="0" width="1" height="2" />
-          <rect x="3" y="0" width="1" height="2" />
-          <rect x="4" y="0" width="1" height="2" />
-          <rect x="5" y="0" width="1" height="2" />
-          <rect x="6" y="0" width="1" height="2" />
-          <rect x="7" y="0" width="1" height="2" />
-          <rect x="2" y="2" width="1" height="2" />
-          <rect x="3" y="2" width="1" height="2" />
-          <rect x="6" y="2" width="1" height="2" />
-          <rect x="7" y="2" width="1" height="2" />
-          <rect x="0" y="4" width="1" height="2" />
-          <rect x="1" y="4" width="1" height="2" />
-          <rect x="2" y="4" width="1" height="2" />
-          <rect x="3" y="4" width="1" height="2" />
-          <rect x="4" y="4" width="1" height="2" />
-          <rect x="5" y="4" width="1" height="2" />
-          <rect x="2" y="6" width="1" height="2" />
-          <rect x="3" y="6" width="1" height="2" />
-        </svg>
-        {!mobile && <span className="text-[15px] font-semibold tracking-tight">kore</span>}
+        />
+        {!mobile && <span data-flip="nav-wordmark" className="text-[15px] font-semibold tracking-tight">kore</span>}
         {!mobile && (
           <button
-            onClick={toggleTabSide}
+            data-flip="nav-toggle"
+            onClick={() => {
+              flipCapture()
+              toggleTabSide()
+            }}
             aria-label={left ? '标签栏放到顶部' : '标签栏放到左侧'}
             title={left ? '标签栏放到顶部' : '标签栏放到左侧'}
             className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-8 shrink-0 items-center justify-center rounded-md"
           >
-            <PanelLeft className="size-[18px]" />
+            <PanelLeft className="size-4" />
           </button>
         )}
       </div>
 
       {/* overview / home */}
       <button
+        data-flip="nav-overview"
         onClick={() => wmStore.setView('home')}
         aria-label="总览"
         title="总览"
@@ -86,7 +77,7 @@ export function Chrome({ version, orientation }: { version?: string; orientation
           home ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground',
         )}
       >
-        <Home className="size-[18px] shrink-0" />
+        <Home className="size-4 shrink-0" />
         {left && '总览'}
         {needsYou ? (
           <span
@@ -105,8 +96,6 @@ export function Chrome({ version, orientation }: { version?: string; orientation
         ) : null}
       </button>
 
-      {left && <div className="bg-border/60 my-1 h-px" />}
-
       {/* tabs; on mobile settings rides at the end so it scrolls with the + */}
       <WorkspaceTabs vertical={left} trailing={mobile ? <SettingsMenu /> : undefined} />
 
@@ -115,15 +104,19 @@ export function Chrome({ version, orientation }: { version?: string; orientation
         (left ? (
           <>
             <div className="flex-1" />
-            <div className="flex items-center justify-between px-1">
-              {version && <span className="text-muted-foreground text-xs tabular-nums">{version}</span>}
-              <SettingsMenu />
+            <div className="flex items-center justify-between pl-2.5 pr-1">
+              {version && <span data-flip="nav-version" className="text-muted-foreground text-xs tabular-nums">{version}</span>}
+              <span data-flip="nav-settings" className="inline-flex">
+                <SettingsMenu />
+              </span>
             </div>
           </>
         ) : (
           <>
-            {version && <span className="text-muted-foreground mr-1 text-xs tabular-nums">{version}</span>}
-            <SettingsMenu />
+            {version && <span data-flip="nav-version" className="text-muted-foreground mr-1 text-xs tabular-nums">{version}</span>}
+            <span data-flip="nav-settings" className="inline-flex">
+              <SettingsMenu />
+            </span>
           </>
         ))}
     </nav>

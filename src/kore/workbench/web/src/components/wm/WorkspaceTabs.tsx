@@ -12,7 +12,7 @@ import { cn } from '@/lib/utils'
 export function WorkspaceTabs({ vertical = false, trailing }: { vertical?: boolean; trailing?: ReactNode }) {
   useWmVersion()
   useSeenVersion()
-  const { roster } = useRosterCtx()
+  const { roster, fetchedAt } = useRosterCtx()
   const s = wmStore.get()
   const stage = s.view === 'stage'
   const visible = wmStore.visibleSessionKeys()
@@ -28,7 +28,7 @@ export function WorkspaceTabs({ vertical = false, trailing }: { vertical?: boole
       const sess = roster?.sessions?.find((x) => x.node_ip === w.state.node_ip && x.name === w.state.name)
       if (!sess) continue
       any = true
-      const st = effectiveState(sess, visible)
+      const st = effectiveState(sess, visible, fetchedAt)
       if (st === 'waiting') return 'waiting'
       if (st === 'busy') busy = true
       if (st === 'done') done = true
@@ -49,6 +49,7 @@ export function WorkspaceTabs({ vertical = false, trailing }: { vertical?: boole
         return (
           <div
             key={ws.id}
+            data-flip={`nav-tab-${ws.id}`}
             role="tab"
             tabIndex={0}
             aria-selected={activeTab}
@@ -57,7 +58,7 @@ export function WorkspaceTabs({ vertical = false, trailing }: { vertical?: boole
             className={cn(
               'group flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-md pr-1 pl-2.5 text-sm transition-all duration-200',
               vertical ? 'w-full' : 'max-w-[220px]',
-              activeTab ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+              activeTab ? 'bg-card text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground',
             )}
           >
             {wsState(ws) && <StatusDot state={wsState(ws)} className="mr-0.5" />}
@@ -95,6 +96,7 @@ export function WorkspaceTabs({ vertical = false, trailing }: { vertical?: boole
         )
       })}
       <button
+        data-flip="nav-newws"
         onClick={() => wmStore.newBlankWorkspace()}
         aria-label="新建工作区"
         title="新建工作区（空白分屏布局）"

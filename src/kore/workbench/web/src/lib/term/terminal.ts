@@ -7,6 +7,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { kPost, TOKEN } from '@/lib/api'
+import { markActed } from '@/lib/seen'
 import { kws } from './kws'
 import { fontGet, wantsWebgl } from './settings'
 
@@ -139,6 +140,7 @@ export function createKoreTerminal(
   let tapFresh = false
   let got = 0
   let downs = 0
+  let errRetries = 0 // bounded resubscribes after an err-after-data (transient tap drop)
   let wdog: ReturnType<typeof setTimeout> | 0 = 0
   let queue: string[] = []
   let sending = false
@@ -259,6 +261,10 @@ export function createKoreTerminal(
   }
   function input(data: string) {
     if (!focused || !s.writable || typeof data !== 'string' || !data) return
+    // Any keystroke to a session means the user is dealing with it — optimistically stop its
+    // "需要你" blink at once (the backend also flips it busy on delivery; the next roster read
+    // reconciles). mark is self-coalescing, so this is cheap to call per keypress.
+    markActed(s.node_ip + '/' + s.name)
     if (ctrlArmed) {
       data = ctrlify(data)
       ctrlArmed = false
@@ -376,19 +382,33 @@ export function createKoreTerminal(
           say('')
         }
         got += u8.length
+        errRetries = 0 // bytes are flowing again — clear the resubscribe budget
         term.write(u8)
         markReady()
       },
       err: (m) => {
-        if (stream && (stream as any).id === id) {
-          if (!got) {
-            fallback('字节流起不来，退回抓屏：' + (m.error || ''))
-            return
-          }
-          kws.unsub(id)
-          stream = null
-          say('对面结束了：' + (m.error || ''))
+        if (!(stream && (stream as any).id === id)) return
+        if (!got) {
+          fallback('字节流起不来，退回抓屏：' + (m.error || ''))
+          return
         }
+        // Had data, then the tap dropped — usually a server/agent restart, not a dead session.
+        // Don't freeze the pane: drop this stream and try a bounded, backed-off resubscribe; if
+        // the budget is spent, degrade to the screen feed (the roster prune removes the window if
+        // the session is truly gone, and ctl.reload() is always there for a manual kick).
+        kws.unsub(id)
+        stream = null
+        if (disposed) return
+        if (errRetries >= 3) {
+          fallback('实时流不稳，退回抓屏：' + (m.error || ''))
+          return
+        }
+        const delay = 600 * 2 ** errRetries
+        errRetries += 1
+        say('连接中断，重连中…')
+        setTimeout(() => {
+          if (!disposed && !stream) subscribe()
+        }, delay)
       },
       end: () => {
         if (stream && (stream as any).id === id && !got) fallback('字节流中断，退回抓屏')

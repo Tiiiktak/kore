@@ -23,6 +23,8 @@ export interface NodeInfo {
   node_ip: string
   self: boolean
   hostname: string
+  agent_started?: number // client agent process start epoch; changes when it restarts
+  pid?: number
 }
 
 export interface Labels {

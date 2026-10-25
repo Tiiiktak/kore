@@ -29,3 +29,6 @@ agent.log
 # Editor / OS
 .DS_Store
 *.swp
+
+# local screenshots
+shots/

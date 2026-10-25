@@ -57,6 +57,7 @@ forbids. It is allowed for three reasons, and all three are load-bearing:
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import fcntl
 import gzip
 import hashlib
@@ -69,6 +70,7 @@ import queue
 import re
 import secrets
 import select
+import shlex
 import socket
 import socketserver
 import struct
@@ -192,8 +194,65 @@ _WS_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")   # tmux session name on a ws
 # Display labels: a nickname and/or an icon per node (key = node_ip) and per session
 # (key = "<node_ip>/<session>"). Kept server-side so every device shows the same names.
 # Icons are drawn by the dashboard; here an icon is only an id ("cat", "apple", …).
-LABELS_FILE = os.path.join(
-    os.path.expanduser(os.environ.get("KORE_STATE_HOME") or "~/.kore"), "labels.json")
+_STATE_HOME = os.path.expanduser(os.environ.get("KORE_STATE_HOME") or "~/.kore")
+LABELS_FILE = os.path.join(_STATE_HOME, "labels.json")
+# Platform config the user edits from the dashboard (not the write POLICY in
+# dispatch-allowlist.json). Currently just the upgrade proxy — github.com is usually blocked
+# on an intranet node, so the user points the latest-check + `kore upgrade` at a proxy here.
+# Local + 0600: it may carry proxy credentials, so it is never committed and never logged.
+CONFIG_FILE = os.path.join(_STATE_HOME, "config.json")
+_CONFIG_KEYS = ("upgrade_proxy", "no_proxy")
+_config_mu = threading.Lock()
+
+
+def _config_load() -> dict:
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        d = {}
+    return {k: str(d.get(k) or "") for k in _CONFIG_KEYS} if isinstance(d, dict) else \
+        {k: "" for k in _CONFIG_KEYS}
+
+
+def _config_set(updates: dict) -> dict:
+    with _config_mu:
+        cfg = _config_load()
+        for k in _CONFIG_KEYS:
+            if k in updates:
+                cfg[k] = str(updates[k] or "").strip()
+        os.makedirs(_STATE_HOME, exist_ok=True)
+        tmp = f"{CONFIG_FILE}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+        os.chmod(tmp, 0o600)        # may hold proxy credentials
+        os.replace(tmp, CONFIG_FILE)
+    return cfg
+
+
+def _apply_upgrade_proxy() -> None:
+    """Point cli.py's GitHub calls (latest-check) at the configured proxy, if any. cli reads
+    its proxy from the live `_ORIG_PROXY` dict, so overwriting it here is the injection seam —
+    no env mutation of this long-running process."""
+    cfg = _config_load()
+    px = cfg.get("upgrade_proxy") or ""
+    if not px:
+        return
+    npx = cfg.get("no_proxy") or ""
+    _cli._ORIG_PROXY = {"http_proxy": px, "https_proxy": px, "HTTP_PROXY": px,
+                        "HTTPS_PROXY": px, "no_proxy": npx, "NO_PROXY": npx}
+
+
+def _proxy_cmd_prefix() -> str:
+    """`https_proxy=… http_proxy=… no_proxy=… ` for a `kore upgrade` run on a node, or '' when
+    no proxy is configured. shlex-quoted; the node's upgrade then reaches GitHub through it."""
+    cfg = _config_load()
+    px = cfg.get("upgrade_proxy") or ""
+    if not px:
+        return ""
+    npx = cfg.get("no_proxy") or ""
+    return (f"https_proxy={shlex.quote(px)} http_proxy={shlex.quote(px)} "
+            f"no_proxy={shlex.quote(npx)} ")
 _LABEL_KEY_RE = {
     "node": re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$"),
     "session": re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}/[A-Za-z0-9_-]{1,64}$"),
@@ -303,8 +362,12 @@ def _agents_register(node_ip: str, agent_url: str, sessions: list,
             except (OSError, ValueError):
                 data = {}
             old = data.get(node_ip)
-            if isinstance(old, dict) and old.get("started_at") is not None:
-                rec["started_at"] = old["started_at"]  # preserve the agent's own uptime
+            # Trust the started_at the agent sent (it knows its own process start, constant
+            # within a process and CHANGED on restart — which is how the dashboard confirms a
+            # restart). Fall back to the last stored value only if this register omitted it
+            # (an older agent that doesn't report it), so the field never regresses to null.
+            if rec.get("started_at") is None and isinstance(old, dict) and old.get("started_at") is not None:
+                rec["started_at"] = old["started_at"]
             data[node_ip] = rec
             tmp = f"{KORE_AGENTS_FILE}.tmp.{os.getpid()}"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -554,8 +617,84 @@ koreops = _load("wb_koreops", KORE_OPS_PATH)
 # One bridge instance for the whole process: its per-session locks live in module
 # globals, and two copies would let two concurrent sends interleave keystrokes.
 koreops.use_bridge(state_mod.bridge())
+# cli.py holds the proxy/token-aware "latest release tag" lookup (git ls-remote + HTTP
+# fallback). Load it BY PATH like koreops — this file runs as a script, so `kore.cli` isn't
+# importable from a clone/install.sh layout. Reused by _latest_release() below, never
+# duplicated. Importing it only sets constants (no side effects at module scope).
+_cli = _load("wb_cli", os.path.join(os.path.dirname(HERE), "cli.py"))
 
 _state_lock = threading.Lock()
+
+# "newest release on the remote", cached so the browser's 检查更新 button can't hammer GitHub.
+# Success is cached for KORE_LATEST_TTL; a failure (common on an intranet node whose proxy env
+# was stripped) is cached briefly so a transient miss retries soon. `force` bypasses the cache.
+LATEST_TTL = float(os.environ.get("KORE_LATEST_TTL", "3600"))
+_latest_cache: dict = {"at": 0.0, "ttl": 0.0, "data": None}
+_latest_lock = threading.Lock()
+
+
+def _latest_release(force: bool = False) -> dict:
+    now = time.time()
+    with _latest_lock:
+        c = _latest_cache
+        if not force and c["data"] is not None and now - c["at"] < c["ttl"]:
+            return c["data"]
+    try:
+        _apply_upgrade_proxy()          # point cli at the configured proxy, if any
+        tok = _cli._gh_token()
+        latest, err = _cli._latest_tag(tok)
+        source = "git"
+        if not latest:
+            latest, err2 = _cli._latest_tag_http()
+            source = "http"
+            err = (f"{err}; {err2}" if err else err2) if not latest else ""
+    except Exception as exc:  # noqa: BLE001 - a check must never 500 the dashboard
+        latest, err, source = "", str(exc), ""
+    if latest:
+        try:
+            outdated = bool(_cli._is_semver(KORE_VERSION) and _cli._is_semver(latest)
+                            and _cli._vtuple(latest) > _cli._vtuple(KORE_VERSION))
+        except Exception:  # noqa: BLE001
+            outdated = False
+        data = {"ok": True, "current": KORE_VERSION, "latest": latest,
+                "outdated": outdated, "source": source}
+    else:
+        data = {"ok": False, "current": KORE_VERSION, "latest": "", "outdated": False,
+                "error": err or "could not reach the release feed"}
+    with _latest_lock:
+        _latest_cache.update(at=now, ttl=(LATEST_TTL if data["ok"] else 60.0), data=data)
+    return data
+
+
+# Per-node system metrics (load / cpu / mem / disk / gpu) for the overview. Its own short TTL,
+# independent of the 120s cluster roster — metrics move faster and shouldn't force a full
+# rescan. Collected by fanning node_system_metrics() across live nodes (each a bounded sh()).
+SYSINFO_TTL = float(os.environ.get("KORE_SYSINFO_TTL", "8"))
+_sysinfo_cache: dict = {"at": 0.0, "data": None}
+_sysinfo_lock = threading.Lock()
+
+
+def _sysinfo(force: bool = False) -> dict:
+    now = time.time()
+    with _sysinfo_lock:
+        c = _sysinfo_cache
+        if not force and c["data"] is not None and now - c["at"] < SYSINFO_TTL:
+            return c["data"]
+    eng = state_mod.bridge()
+    ips = list(eng.alive_ips())
+    nodes: dict = {}
+    if ips:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(ips))) as ex:
+            futs = {ip: ex.submit(eng.node_system_metrics, ip) for ip in ips}
+            for ip, fut in futs.items():
+                try:
+                    nodes[ip] = fut.result(timeout=16)
+                except Exception:  # noqa: BLE001 - one slow node yields {}, never a 500
+                    nodes[ip] = {}
+    data = {"ok": True, "at": now, "nodes": nodes}
+    with _sysinfo_lock:
+        _sysinfo_cache.update(at=now, data=data)
+    return data
 
 
 def _common_prefix(a: list[str], b: list[str]) -> int:
@@ -891,6 +1030,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             eng = state_mod.bridge()
             prune = getattr(eng, "agents_prune", None)
             self._json(200, {"ok": True, "agents": prune() if prune else {}})
+        elif path == "/api/kore/latest":
+            # Installed build vs. newest release on the remote, for the dashboard's 检查更新 /
+            # 升级 affordance. TTL-cached so the button can't hammer GitHub; ?force=1 re-checks.
+            # Never 500s — an unreachable feed returns {ok:false, error}.
+            self._json(200, _latest_release(force=one("force") == "1"))
+        elif path == "/api/kore/config":
+            # Platform settings the user edits in the dashboard (the upgrade proxy today).
+            self._json(200, {"ok": True, "config": _config_load()})
+        elif path == "/api/kore/sysinfo":
+            # Per-node load / cpu / mem / disk / gpu for the overview. Short-TTL cached;
+            # ?force=1 recollects. Never 500s — an unreachable node is just {}.
+            self._json(200, _sysinfo(force=one("force") == "1"))
         elif path == "/api/join":
             # Everything the "add a machine" panel needs: the install one-liner, the exact
             # `kore client` line, and how each joined client is doing. Guarded by the WB
@@ -1759,12 +1910,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # token but not koreops' gate or a `confirm`.
                 self._labels_endpoint(raw)
                 return
+            if path == "/api/kore/config":
+                # Platform settings (upgrade proxy). Local to this board — nothing reaches a
+                # node on save — so like /api/labels it needs the Bearer but no confirm.
+                self._config_endpoint(raw)
+                return
             if path.startswith("/api/kore/fs/"):
                 # File-browser WRITES (mkdir/rename/delete/upload). A separate door from the
                 # tmux WRITE_VERBS below: the target is a PATH, not a session, so the gate
                 # (koreops.fs_write) keys audit + confirm by path, not NAME_RE. Same Bearer
                 # (checked above) and the same confirm discipline, path-shaped.
                 self._fs_write_endpoint(path, raw)
+                return
+            if path.startswith("/api/kore/node/") or path.startswith("/api/kore/server/"):
+                # Node LIFECYCLE actions (restart / upgrade the client agent or this board).
+                # Same Bearer door (checked above); confirm is node-shaped, not session-shaped;
+                # the command is server-built from a fixed template. See _node_action_endpoint.
+                self._node_action_endpoint(path, raw)
                 return
             verb = path.rsplit("/", 1)[1] if path.startswith("/api/kore/") else ""
             if verb not in koreops.WRITE_VERBS:
@@ -1865,6 +2027,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self._json(200, {"ok": True, "labels": labels})
 
+    def _config_endpoint(self, raw: bytes) -> None:
+        """POST platform config. Only _CONFIG_KEYS are honored; returns the stored config."""
+        try:
+            body = json.loads(raw.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._json(400, {"ok": False, "error": f"bad JSON body: {exc}"})
+            return
+        if not isinstance(body, dict):
+            self._json(400, {"ok": False, "error": "body must be a JSON object"})
+            return
+        self._json(200, {"ok": True, "config": _config_set(body)})
+
     _FS_WRITE_ROUTES = {"mkdir": "mkdir", "rename": "rename", "delete": "delete",
                         "upload": "put"}
     """URL route -> koreops fs op. `upload` is the chunked `put` (base64 bytes, append flag);
@@ -1900,6 +2074,88 @@ class Handler(http.server.BaseHTTPRequestHandler):
         params = {k: body[k] for k in ("path", "dst", "data", "append") if k in body}
         try:
             self._json(200, koreops.fs_write(node_ip, op, params, who=self._who()))
+        except koreops.KoreOpsError as exc:
+            self._json(403, {"ok": False, "refused": str(exc)})
+
+    _NODE_ACTIONS = ("restart", "upgrade")  # mirrors koreops.NODE_ACTIONS
+
+    def _node_action_cmd(self, target: str, action: str, self_ip: str, version: str) -> str:
+        """The FIXED command for a lifecycle action, detached from the agent/board it replaces.
+
+        `kore upgrade` only swaps files on disk; the restart that follows is what applies them.
+        The whole thing is `setsid`-detached with a 1s delay so SIGTERM'ing the current agent /
+        board — which is servicing this very call — cannot take the relaunch down with it. No
+        request text enters the command except a semver-validated `version`. The client rejoin
+        line carries the agent token (held only by the server), so a client never needs it on
+        disk."""
+        join = (f"kore client --server {self_ip}:{PORT} --token {KORE_AGENT_TOKEN}"
+                if KORE_AGENT_TOKEN else "")
+        ver = f" --version {version}" if version else ""
+        # `kore upgrade` reaches github.com; on an intranet node that needs the configured
+        # proxy, prepended only to the upgrade step (the rejoin/restart stays proxy-free).
+        px = _proxy_cmd_prefix() if action == "upgrade" else ""
+        if target == "server":
+            inner = ("kore server --restart" if action == "restart"
+                     else f"{px}kore upgrade{ver} && kore server --restart")
+        else:
+            if not join:
+                return ""
+            inner = join if action == "restart" else f"{px}kore upgrade{ver} && {join}"
+        payload = f'sleep 1; {inner} >> "$HOME/.kore/action.log" 2>&1'
+        return f"setsid sh -c {shlex.quote(payload)} </dev/null >/dev/null 2>&1 &"
+
+    def _node_action_endpoint(self, path: str, raw: bytes) -> None:
+        """POST /api/kore/{node,server}/{restart,upgrade}. Bearer already checked by do_POST.
+
+        confirm = `node-<action>:<node_ip>` for a client, `server-<action>` for this board — a
+        privileged action must name its own target, the same discipline as every write. NOT a
+        new permission boundary (a WB-token holder already drives every pane via /exec); the
+        fence is the agent token + a fixed, server-built command + koreops' policy toggle and
+        audit. The call may come back as 'dispatched' with a dropped connection — a restart
+        replaces the agent mid-call; the frontend polls the roster for re-registration."""
+        parts = path.strip("/").split("/")       # api / kore / {node|server} / {action}
+        target = parts[2] if len(parts) > 2 else ""
+        action = parts[3] if len(parts) > 3 else ""
+        if target not in ("node", "server") or action not in self._NODE_ACTIONS:
+            self._json(404, {"ok": False, "error": f"no node endpoint {path!r}"})
+            return
+        try:
+            body = json.loads(raw.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._json(400, {"ok": False, "error": f"bad JSON body: {exc}"})
+            return
+        if not isinstance(body, dict):
+            self._json(400, {"ok": False, "error": "body must be a JSON object"})
+            return
+        self_ip = state_mod.bridge()._local_node_ip()
+        if target == "server":
+            node_ip, want = self_ip, f"server-{action}"
+        else:
+            node_ip = str(body.get("node_ip") or "")
+            want = f"node-{action}:{node_ip}"
+            if not node_ip:
+                self._json(400, {"ok": False, "error": "node_ip required"})
+                return
+            if node_ip == self_ip:
+                self._json(400, {"ok": False,
+                                 "error": "this board is the server; use /api/kore/server/*"})
+                return
+        if str(body.get("confirm") or "") != want:
+            self._json(400, {"ok": False, "error": f"confirm must equal {want!r}",
+                             "hint": "a lifecycle action has to name its own target"})
+            return
+        version = str(body.get("version") or "").strip()
+        if version and not re.match(r"^v?\d+\.\d+\.\d+$", version):
+            self._json(400, {"ok": False, "error": f"bad version {version!r}"})
+            return
+        cmd = self._node_action_cmd(target, action, self_ip, version)
+        if not cmd:
+            self._json(400, {"ok": False, "error": "no agent token configured on this board; "
+                                                    "cannot build a client rejoin command"})
+            return
+        try:
+            self._json(202, koreops.node_action(action, node_ip, cmd, kind=target,
+                                                 who=self._who(), timeout=20))
         except koreops.KoreOpsError as exc:
             self._json(403, {"ok": False, "refused": str(exc)})
 
@@ -1943,7 +2199,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         rec = _agents_register(node_ip, agent_url,
                                sessions if isinstance(sessions, list) else [],
                                {"reachable": reachable, "reach_error": reach_error,
-                                "hostname": str(body.get("hostname") or "")[:64]})
+                                "hostname": str(body.get("hostname") or "")[:64],
+                                # the agent's own process identity — surfaced on the roster node
+                                # so the dashboard can confirm a "restart agent" actually bounced
+                                # it (started_at changes when the agent process is replaced).
+                                "started_at": body.get("started_at"), "pid": body.get("pid")})
         self._json(200, {"ok": True, "node_ip": node_ip, "record": rec,
                          "reachable": reachable, "reach_error": reach_error})
 

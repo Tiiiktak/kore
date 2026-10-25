@@ -263,7 +263,12 @@ DEFAULT_POLICY: dict[str, Any] = {
     "read_cache_s": 0.5,
     "read_cache_max": 64,
     "roster_ttl_s": 20.0,
-    "cluster_ttl_s": 120.0,
+    # A cluster sweep is what the dashboard polls, and it carries every session's live state
+    # (busy/waiting/idle) — so a long TTL is exactly what makes "需要你" feel laggy. The sweep
+    # is cheap on a healthy fleet (parallel fanout, a wedged node only costs its own slot's
+    # timeout), so keep this short for a responsive attention signal. KEEP IN SYNC with
+    # dispatch-allowlist.json, which overrides.
+    "cluster_ttl_s": 6.0,
     # Read-agent timeouts. probe_python "" = whatever interpreter is running us. These bound
     # how long a READ in the resident read agent may take before the parent stops waiting.
     "probe_timeout_s": 20.0,
@@ -298,6 +303,11 @@ DEFAULT_POLICY: dict[str, Any] = {
     # parent's write-agent wait (fs_write_timeout_s) must stay above this + _sh_http slack.
     "fs_write_node_timeout_s": 30,
     "fs_write_timeout_s": 60.0,
+    # ---- node lifecycle actions (restart / upgrade the agent or board) ----------------
+    # Not a new permission boundary — a WB-token holder can already RCE every node via the
+    # session write door — so this is the on/off, and the real fence stays the agent token +
+    # the server-built FIXED command. KEEP IN SYNC with dispatch-allowlist.json.
+    "node_actions": {"enabled": True, "actions": {"restart": True, "upgrade": True}},
 }
 
 
@@ -2536,6 +2546,40 @@ def fs_write(node_ip: str, op: str, params: dict[str, Any], *,
         raise KoreOpsError(f"refused: {refused}")
     return {"ok": ok, "node_ip": node_ip,
             **{k: v for k, v in res.items() if k not in ("ok", "agent")}}
+
+
+NODE_ACTIONS = ("restart", "upgrade")
+
+
+def node_action(action: str, node_ip: str, cmd: str, *, kind: str = "node",
+                who: str = "unknown", timeout: int = 20) -> dict[str, Any]:
+    """Run a FIXED lifecycle command (restart / upgrade) on a node's host, audited.
+
+    NOT a new permission boundary — a WB-token holder can already RCE every node via the
+    session write door — so the gate is: policy toggle + a closed action allowlist + the fact
+    that `cmd` is built by the server from a template (no user text in it) + this audit log.
+    `node_ip` is validated like every read. A restart/upgrade REPLACES the very agent/board
+    servicing this call, so `cmd` is expected to be detached (setsid) and the call may return a
+    dropped connection instead of a clean rc — that is 'dispatched', not a failure."""
+    pol = policy()
+    np = pol.get("node_actions") or {}
+    if not np.get("enabled", True):
+        raise KoreOpsError("refused: node 动作在写策略里被关闭了（node_actions.enabled=false）")
+    if action not in NODE_ACTIONS or not (np.get("actions") or {}).get(action, False):
+        raise KoreOpsError(f"refused: node 动作 {action!r} 不被允许，已开启：{NODE_ACTIONS}")
+    _read_node_gate(node_ip)        # IPv4 + deny_nodes + routable, same as every read/write
+    base = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "at_epoch": time.time(),
+            "verb": "node", "op": action, "kind": kind, "who": who, "node_ip": node_ip}
+    _audit({**base, "action": "accepted", "cmd": cmd[:500]})
+    note = ""
+    try:
+        res = bridge().sh(node_ip, cmd, timeout)
+    except Exception as exc:  # noqa: BLE001 - a restart replaces the agent mid-call; a dropped
+        res, note = {}, str(exc)[:200]   # connection is the EXPECTED outcome, not a failure
+    out = res.get("stdout", "") if isinstance(res, dict) else ""
+    _audit({**base, "action": "finished", "ok": True, "note": note})
+    return {"ok": True, "node_ip": node_ip, "action": action, "kind": kind,
+            "dispatched": True, "note": note, "stdout": str(out)[:2000]}
 
 
 def read_verb(verb: str, node_ip: str, name: str, *, who: str = "unknown",

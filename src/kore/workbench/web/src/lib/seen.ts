@@ -55,11 +55,39 @@ export function useSeenVersion(): number {
   return useSyncExternalStore(seenStore.subscribe, seenStore.version, seenStore.version)
 }
 
-// The dot state to render: a fresh, unseen, finished (idle) session that is NOT currently on
-// screen shows "done"; everything else is its raw roster state.
-export function effectiveState(s: Session, visible: Set<string>): string {
-  if (s.state !== 'idle') return s.state
+// --- optimistic "I just acted on this" suppression for the waiting blink --------------------
+// Opening a waiting session, or sending it any input, records a wall-clock instant here. While
+// that instant is NEWER than the roster snapshot being rendered (its `fetchedAt`), the session is
+// shown as busy instead of blinking "需要你". The first roster read that post-dates the action
+// wins — so a prompt you really answered stops blinking at once, while one still on screen (or
+// answered elsewhere but not yet rescanned) correctly resumes. Same client clock on both sides,
+// so no skew. Not persisted: a reload re-reads the real state, which is what you'd want.
+const acted = new Map<string, number>()
+
+export function markActed(key: string): void {
+  const now = Date.now()
+  const prev = acted.get(key)
+  acted.set(key, now)
+  // coalesce re-renders during continuous typing — the dot only needs to flip once per episode
+  if (prev == null || now - prev > 2000) {
+    version++
+    subs.forEach((f) => f())
+  }
+}
+
+function actedAfter(key: string, fetchedAt: number | null): boolean {
+  const t = acted.get(key)
+  return t != null && (fetchedAt == null || t > fetchedAt)
+}
+
+// The dot state to render. `waiting`: suppressed to busy if the user acted after this snapshot
+// (see above). A fresh, unseen, finished (idle) session not currently on screen shows "done";
+// everything else is its raw roster state. Pass `fetchedAt` (roster snapshot time) for the
+// waiting suppression to work; omit it and waiting always shows.
+export function effectiveState(s: Session, visible: Set<string>, fetchedAt: number | null = null): string {
   const key = sessKey(s)
+  if (s.state === 'waiting') return actedAfter(key, fetchedAt) ? 'busy' : 'waiting'
+  if (s.state !== 'idle') return s.state
   if (visible.has(key)) return 'idle'
   return seenStore.isUnseen(key, s.state_since) ? 'done' : 'idle'
 }

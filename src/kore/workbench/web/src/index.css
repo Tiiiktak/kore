@@ -208,18 +208,6 @@
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
-/* window open: a pane eases in (fade + slight scale) when it mounts in the stage. */
-@keyframes winIn {
-  from { opacity: 0; transform: scale(0.97); }
-  to { opacity: 1; transform: scale(1); }
-}
-/* tab bar side switch (top↔left): the nav re-keys and eases in, so the switch reads as a
-   soft settle instead of a hard jump (the main area repositions instantly — terminals are
-   never transformed). */
-@keyframes navIn {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
 
 /* Quality floor: visible keyboard focus on custom interactive elements (shadcn components set
    their own; :where() keeps 0 specificity so those still win). And honor reduced-motion. */
