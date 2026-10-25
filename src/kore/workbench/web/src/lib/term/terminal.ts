@@ -125,6 +125,7 @@ export function createKoreTerminal(
   say: (m: string) => void,
   winId: string,
   onCtrl: (on: boolean) => void = () => {},
+  onReady: () => void = () => {},
 ): KoreTerminal {
   const s = session
   const id = winId + '|' + s.node_ip + '/' + s.name
@@ -147,6 +148,19 @@ export function createKoreTerminal(
   let focused = false
   let disposed = false
   let ctrlArmed = false
+  // Fired once, the first time real content paints (first tap byte, or the first non-prime
+  // frame). The loading overlay lives in TerminalView and is torn down on this — same idea as
+  // the old board unveiling #c-pane-loading when the first byte arrived.
+  let readyFired = false
+  const markReady = () => {
+    if (readyFired) return
+    readyFired = true
+    try {
+      onReady()
+    } catch {
+      /* ignore */
+    }
+  }
 
   const term = new Terminal({
     convertEol: true,
@@ -229,6 +243,7 @@ export function createKoreTerminal(
     term.write(out + (f.cvis ? '\x1b[?25h' : ''))
     if (f.kind === 'full') fitGeom()
     say(f.state || '')
+    if (!f.prime) markReady() // a real frame (screen feed / echo) — not the "连接中" placeholder
   }
 
   const echoable = (d: string) => typeof d === 'string' && !!d && !/[\u0000-\u001f\u007f]/.test(d)
@@ -362,6 +377,7 @@ export function createKoreTerminal(
         }
         got += u8.length
         term.write(u8)
+        markReady()
       },
       err: (m) => {
         if (stream && (stream as any).id === id) {

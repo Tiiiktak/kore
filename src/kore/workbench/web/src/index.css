@@ -190,6 +190,19 @@
 }
 .kore-blink { animation: kore-blink 0.85s steps(1, end) infinite; }
 
+/* terminal "Connecting…" overlay: fade in after a 0.3s delay (set in the utility class), so a
+   fast local connect that readies within 300ms never flashes the mark. */
+@keyframes termLoadIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+/* brand-mark loader: each sub-pixel breathes, offset by its diagonal position, so a wave of
+   light sweeps across the mark and loops. */
+@keyframes termPixelWave {
+  0%, 100% { opacity: 0.16; }
+  50% { opacity: 1; }
+}
+
 /* Quality floor: visible keyboard focus on custom interactive elements (shadcn components set
    their own; :where() keeps 0 specificity so those still win). And honor reduced-motion. */
 :where([role="button"], [role="option"], [role="tab"], [role="menuitem"], [role="separator"]):focus-visible {
