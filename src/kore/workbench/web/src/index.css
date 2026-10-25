@@ -93,6 +93,7 @@
     --busy-bg: #fdf4e0;
     --idle-bg: #e9f2fd;
     --brand-bg: #f2ecfd;
+    --bad-bg: #fcebec;
     --chart-1: #8250df;
     --chart-2: #0969da;
     --chart-3: #1a7f37;
@@ -139,6 +140,7 @@
     --busy-bg: #241c0e;
     --idle-bg: #10203a;
     --brand-bg: #1e1830;
+    --bad-bg: #2b1416;
     --chart-1: #a371f7;
     --chart-2: #58a6ff;
     --chart-3: #3fb950;

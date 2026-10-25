@@ -23,7 +23,9 @@ export interface Workspace {
   zoom: string | null
 }
 
-export const WM_GAP = 6
+// The space between panes = the width of the hairline divider drawn by the sash. One workspace
+// reads as a single card split by thin lines, not a row of separate cards.
+export const WM_GAP = 1
 export const WM_MIN_W = 240
 export const WM_MIN_H = 140
 

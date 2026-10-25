@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { Columns2, FolderOpen, Globe, Plus, Rows2, TerminalSquare, X } from 'lucide-react'
 import { StatusDot } from '@/components/StatusDot'
+import { Hint } from '@/components/Hint'
 import { useRosterCtx } from '@/lib/roster-context'
 import { listWins } from '@/lib/wm/tree'
 import { useWmVersion, wmStore } from '@/lib/wm/store'
@@ -87,27 +88,28 @@ export function WorkspaceTabs({ vertical = false, trailing }: { vertical?: boole
                 wmStore.closeWs(ws.id)
               }}
               aria-label="关闭工作区"
-              title="关闭工作区（不杀 session）"
-              className="hover:bg-[var(--bad-bg,var(--accent))] hover:text-[var(--bad)] flex size-6 shrink-0 items-center justify-center rounded opacity-0 group-hover:opacity-100 aria-[selected=true]:opacity-100"
+              className="hover:bg-[var(--bad-bg)] hover:text-[var(--bad)] flex size-6 shrink-0 items-center justify-center rounded-lg opacity-0 group-hover:opacity-100 aria-[selected=true]:opacity-100"
             >
               <X className="size-4" />
             </button>
           </div>
         )
       })}
-      <button
-        data-flip="nav-newws"
-        onClick={() => wmStore.newBlankWorkspace()}
-        aria-label="新建工作区"
-        title="新建工作区（空白分屏布局）"
-        className={cn(
-          'text-muted-foreground hover:bg-accent hover:text-foreground flex h-9 shrink-0 items-center justify-center rounded-md text-sm',
-          vertical ? 'w-full justify-start gap-2.5 pl-2.5' : 'w-9',
-        )}
-      >
-        <Plus className="size-4" />
-        {vertical && <span>新建工作区</span>}
-      </button>
+      {/* icon-only (horizontal) needs a hint; the vertical form already shows the label as text */}
+      <Hint label={vertical ? '' : '新建工作区'}>
+        <button
+          data-flip="nav-newws"
+          onClick={() => wmStore.newBlankWorkspace()}
+          aria-label="新建工作区"
+          className={cn(
+            'text-muted-foreground hover:bg-accent hover:text-foreground flex h-9 shrink-0 items-center justify-center rounded-md text-sm',
+            vertical ? 'w-full justify-start gap-2.5 pl-2.5' : 'w-9',
+          )}
+        >
+          <Plus className="size-4" />
+          {vertical && <span>新建工作区</span>}
+        </button>
+      </Hint>
       {trailing}
     </div>
   )

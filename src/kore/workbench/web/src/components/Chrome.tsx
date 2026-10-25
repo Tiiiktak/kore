@@ -1,5 +1,6 @@
 import { Home, PanelLeft } from 'lucide-react'
 import { SettingsMenu } from '@/components/SettingsMenu'
+import { Hint } from '@/components/Hint'
 import { WorkspaceTabs } from '@/components/wm/WorkspaceTabs'
 import { toggleTabSide } from '@/lib/layout'
 import { flipCapture } from '@/lib/wm/flip'
@@ -50,27 +51,28 @@ export function Chrome({ version, orientation }: { version?: string; orientation
         />
         {!mobile && <span data-flip="nav-wordmark" className="text-[15px] font-semibold tracking-tight">kore</span>}
         {!mobile && (
-          <button
-            data-flip="nav-toggle"
-            onClick={() => {
-              flipCapture()
-              toggleTabSide()
-            }}
-            aria-label={left ? '标签栏放到顶部' : '标签栏放到左侧'}
-            title={left ? '标签栏放到顶部' : '标签栏放到左侧'}
-            className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-8 shrink-0 items-center justify-center rounded-md"
-          >
-            <PanelLeft className="size-4" />
-          </button>
+          <Hint label={left ? '标签栏放到顶部' : '标签栏放到左侧'}>
+            <button
+              data-flip="nav-toggle"
+              onClick={() => {
+                flipCapture()
+                toggleTabSide()
+              }}
+              aria-label={left ? '标签栏放到顶部' : '标签栏放到左侧'}
+              className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-8 shrink-0 items-center justify-center rounded-md"
+            >
+              <PanelLeft className="size-4" />
+            </button>
+          </Hint>
         )}
       </div>
 
-      {/* overview / home */}
+      {/* overview / home — icon-only (horizontal) gets a hint; the vertical form shows "总览" text */}
+      <Hint label={left ? '' : '总览'}>
       <button
         data-flip="nav-overview"
         onClick={() => wmStore.setView('home')}
         aria-label="总览"
-        title="总览"
         className={cn(
           'relative flex h-9 items-center gap-2.5 rounded-md text-sm transition-colors',
           left ? 'w-full px-2.5' : 'w-9 justify-center',
@@ -95,6 +97,7 @@ export function Chrome({ version, orientation }: { version?: string; orientation
           />
         ) : null}
       </button>
+      </Hint>
 
       {/* tabs; on mobile settings rides at the end so it scrolls with the + */}
       <WorkspaceTabs vertical={left} trailing={mobile ? <SettingsMenu /> : undefined} />

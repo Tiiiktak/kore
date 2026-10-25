@@ -22,6 +22,7 @@ import hljs from 'highlight.js/lib/common'
 import 'highlight.js/styles/github-dark.css'
 import { toast } from 'sonner'
 import { apiGet, kFsReadB, kFsWrite, TOKEN } from '@/lib/api'
+import { Hint } from '@/components/Hint'
 import { baseName } from '@/lib/wm/store'
 import { cn } from '@/lib/utils'
 import {
@@ -541,29 +542,30 @@ export function FilesView({
             aria-label="过滤文件名"
             className="bg-card text-foreground h-7 w-20 shrink-0 rounded-full px-2.5 text-xs outline-none ring-1 ring-[var(--border)] focus:ring-2"
           />
-          <button
-            onClick={() => actions.onNewFolder(base)}
-            className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-8 items-center justify-center rounded-md"
-            aria-label="新建文件夹"
-            title="新建文件夹"
-            disabled={!canToken}
-          >
-            <FolderPlus className="size-[18px]" />
-          </button>
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-8 items-center justify-center rounded-md"
-            aria-label="上传文件"
-            title="上传到当前根目录"
-            disabled={!canToken}
-          >
-            <Upload className="size-[18px]" />
-          </button>
+          <Hint label="新建文件夹">
+            <button
+              onClick={() => actions.onNewFolder(base)}
+              className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-8 items-center justify-center rounded-md"
+              aria-label="新建文件夹"
+              disabled={!canToken}
+            >
+              <FolderPlus className="size-[18px]" />
+            </button>
+          </Hint>
+          <Hint label="上传到当前根目录">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-8 items-center justify-center rounded-md"
+              aria-label="上传文件"
+              disabled={!canToken}
+            >
+              <Upload className="size-[18px]" />
+            </button>
+          </Hint>
           <button
             onClick={refresh}
             className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-8 items-center justify-center rounded-md"
             aria-label="刷新"
-            title="刷新"
           >
             <RotateCw className={loadingRoot ? 'size-[18px] animate-spin' : 'size-[18px]'} />
           </button>
@@ -671,7 +673,6 @@ export function FilesView({
                     onClick={() => onDownload(sel)}
                     className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-7 shrink-0 items-center justify-center rounded-md"
                     aria-label="下载"
-                    title="下载"
                   >
                     <Download className="size-4" />
                   </button>

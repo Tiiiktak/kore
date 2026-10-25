@@ -73,7 +73,9 @@ export function WmStage() {
 
   return (
     <div className="bg-background absolute inset-0 p-2">
-      <div ref={ref} className="relative size-full">
+      {/* One card for the whole workspace: the rounded border wraps every pane, overflow-hidden
+          clips their corners, and the sashes draw the hairlines that divide it into regions. */}
+      <div ref={ref} className="ring-border relative size-full overflow-hidden rounded-xl ring-1">
         {rects.map((r) => (
           <WmWindow key={r.win} rect={r} active={ws?.focused === r.win} />
         ))}

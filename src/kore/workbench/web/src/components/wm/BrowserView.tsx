@@ -39,7 +39,6 @@ export function BrowserView({ winId, url: initial }: { winId: string; url?: stri
           onClick={() => (url ? setUrl(url + '') : go())}
           className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-8 items-center justify-center rounded-md"
           aria-label="刷新"
-          title="刷新"
         >
           <RotateCw className={loading ? 'size-5 animate-spin' : 'size-5'} />
         </button>
@@ -66,7 +65,6 @@ export function BrowserView({ winId, url: initial }: { winId: string; url?: stri
           onClick={() => url && window.open(url, '_blank', 'noopener')}
           className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-8 items-center justify-center rounded-md"
           aria-label="在新标签页打开"
-          title="在新标签页直接打开"
         >
           <ExternalLink className="size-5" />
         </button>

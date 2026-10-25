@@ -6,6 +6,34 @@ All notable changes to **kore** are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-10-26
+
+### Changed
+- **New-window launcher redesign.** The empty-window picker is now a titled, left-aligned
+  card: 终端/浏览器/文件 as a left tab bar, sectioned content, uniform control sizes, and
+  ↑/↓ + Enter to open from the session list. It's top-anchored so switching tabs doesn't make
+  it jump, and it rides up (instead of leaving a big blank) in a short pane such as the bottom
+  of an up/down split. You can now start a session on a chosen machine even when the workspace
+  has no sibling terminal — the old "回总览新建" dead-end is gone.
+- **The window title is its own quick-switch popover.** Clicking a pane's title opens a slim
+  switcher (already-open / same-machine sessions first, a filter, plus 网址 and 文件) instead
+  of reusing the full launcher.
+- **A workspace reads as one card.** Split panes are tiled inside a single rounded card
+  divided by 1px hairline sashes (brighten on hover/drag), not separate cards with gaps; the
+  per-pane active frame was dropped. Pane-header buttons now have theme-independent hover
+  feedback, and the title / close hovers use iOS-style concentric corners at the card's
+  corners.
+
+### Added
+- **Hover tooltips on non-obvious icons** via a small `Hint` wrapper over the shadcn Tooltip
+  (instant). Universally understood icons (close, refresh…), text-labeled buttons, and touch
+  controls are intentionally left without one.
+
+### Fixed
+- **`--bad-bg` was referenced but never defined**, so close / 结束 session / 关闭工作区 hovers
+  silently fell back to grey instead of a soft red. Added the light/dark token and pointed
+  those destructive controls at it.
+
 ## [0.5.4] — 2026-10-26
 
 ### Added

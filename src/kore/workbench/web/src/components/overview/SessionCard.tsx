@@ -3,6 +3,7 @@ import { Star, TerminalSquare, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { kPost } from '@/lib/api'
 import { StatusDot } from '@/components/StatusDot'
+import { Hint } from '@/components/Hint'
 import { sessKey, sessName, stateLabel } from '@/lib/kore'
 import type { Labels, Session } from '@/lib/types'
 import { cn } from '@/lib/utils'
@@ -74,21 +75,22 @@ export function SessionCard({
       tabIndex={0}
       onClick={() => onOpen(s)}
       onKeyDown={(e) => e.key === 'Enter' && onOpen(s)}
-      className="group bg-card hover:border-ring/40 relative flex h-[128px] cursor-pointer flex-col rounded-lg border p-3 text-left transition-colors"
+      className="group bg-card hover:border-ring hover:bg-accent/40 relative flex h-[128px] cursor-pointer flex-col rounded-lg border p-3 text-left transition-colors"
     >
       <div className="flex items-center gap-2">
         <StatusDot state={st} />
-        <button
-          onClick={(e) => {
-            e.stopPropagation()
-            onRename()
-          }}
-          title="改备注名"
-          aria-label="改备注名"
-          className="text-muted-foreground hover:text-foreground shrink-0 rounded"
-        >
-          <TerminalSquare className="size-[18px]" />
-        </button>
+        <Hint label="改备注名">
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              onRename()
+            }}
+            aria-label="改备注名"
+            className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-6 shrink-0 items-center justify-center rounded-md"
+          >
+            <TerminalSquare className="size-[18px]" />
+          </button>
+        </Hint>
         <span className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-tight">
           {name}
           {real && <span className="text-muted-foreground ml-1 text-[11px] font-normal">{real}</span>}
@@ -108,19 +110,20 @@ export function SessionCard({
         >
           <Star className="size-4" fill={starred ? 'currentColor' : 'none'} />
         </button>
-        <button
-          aria-label={armed ? '确认结束' : '结束 session'}
-          title={armed ? '再点一次 = 真结束（kill 整个 tmux，不可撤）' : '结束 session'}
-          onClick={kill}
-          className={cn(
-            'flex shrink-0 items-center justify-center rounded transition-opacity',
-            armed
-              ? 'bg-[var(--bad)] h-6 px-1.5 text-[10px] font-semibold text-white opacity-100'
-              : 'text-muted-foreground hover:bg-[var(--bad-bg)] hover:text-[var(--bad)] size-6 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
-          )}
-        >
-          {armed ? '确认' : <Trash2 className="size-4" />}
-        </button>
+        <Hint label={armed ? '再点一次 = 真结束（kill 整个 tmux，不可撤）' : '结束 session'}>
+          <button
+            aria-label={armed ? '确认结束' : '结束 session'}
+            onClick={kill}
+            className={cn(
+              'flex shrink-0 items-center justify-center rounded transition-opacity',
+              armed
+                ? 'bg-[var(--bad)] h-6 px-1.5 text-[10px] font-semibold text-white opacity-100'
+                : 'text-muted-foreground hover:bg-[var(--bad-bg)] hover:text-[var(--bad)] size-6 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
+            )}
+          >
+            {armed ? '确认' : <Trash2 className="size-4" />}
+          </button>
+        </Hint>
         <span
           className={cn(
             'text-muted-foreground bg-muted shrink-0 rounded px-1.5 py-0.5 text-[11px] whitespace-nowrap',
