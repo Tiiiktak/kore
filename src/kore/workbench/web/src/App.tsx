@@ -57,11 +57,19 @@ function Shell() {
 
   const content = (
     <main className="relative min-h-0 flex-1">
-      {/* Overview stays mounted (keeps polling); the stage overlays it when not home. */}
-      <div className={home ? 'absolute inset-0' : 'pointer-events-none absolute inset-0 opacity-0'}>
+      {/* Overview stays mounted (keeps polling); the stage overlays it when not home. The two
+          cross-fade on the home↔session switch instead of hard-cutting, and the stage eases in
+          (fade + slight rise) as it mounts. */}
+      <div
+        className={`absolute inset-0 transition-opacity duration-200 ease-out ${home ? 'opacity-100' : 'pointer-events-none opacity-0'}`}
+      >
         <Overview onOpen={openSession} />
       </div>
-      {!home && <WmStage />}
+      {!home && (
+        <div className="absolute inset-0 [animation:viewIn_.24s_ease-out]">
+          <WmStage />
+        </div>
+      )}
     </main>
   )
   return (

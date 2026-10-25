@@ -6,6 +6,18 @@ All notable changes to **kore** are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-10-25
+
+### Added
+- **Motion pass.** State changes animate instead of hard-cutting: overview↔session
+  cross-fade (the stage eases in), a window scale-fades in when opened, workspace tabs and
+  status dots transition their colours, and the top↔left tab-bar switch eases its nav in.
+  Everything is ≤240ms and disabled under `prefers-reduced-motion`.
+
+### Fixed
+- Closing a workspace's last window now returns to the overview (or the next workspace)
+  instead of leaving an empty "new window" page in place.
+
 ## [0.5.2] — 2026-10-25
 
 ### Added

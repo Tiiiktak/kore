@@ -275,9 +275,13 @@ export const wmStore = {
 
   close(winId: string) {
     const ws = active()
-    const w = state.wins[winId]
-    // last, already-empty "new window": closing just regenerates it — no-op
-    if (ws.root.t === 'leaf' && ws.root.win === winId && w?.type === 'term' && !w.state.node_ip) return
+    if (!ws) return
+    // Closing the workspace's ONLY window closes the whole workspace (→ home, or the next
+    // workspace) instead of regenerating an empty "new window" page in place.
+    if (ws.root.t === 'leaf' && ws.root.win === winId) {
+      this.closeWs(ws.id)
+      return
+    }
     removeLeaf(ws, winId)
     emit()
   },

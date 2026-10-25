@@ -28,7 +28,7 @@ export function WmWindow({ rect, active, mobile = false }: { rect: Rect; active:
 
   return (
     <div
-      className="absolute flex flex-col overflow-hidden rounded-lg"
+      className="absolute flex flex-col overflow-hidden rounded-lg [animation:winIn_.2s_ease-out]"
       style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
       onPointerDownCapture={() => wmStore.focus(rect.win)}
     >

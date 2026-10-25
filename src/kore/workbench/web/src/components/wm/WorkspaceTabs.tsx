@@ -55,7 +55,7 @@ export function WorkspaceTabs({ vertical = false, trailing }: { vertical?: boole
             onClick={() => wmStore.switchWs(i)}
             onKeyDown={(e) => e.key === 'Enter' && wmStore.switchWs(i)}
             className={cn(
-              'group flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-md pr-1 pl-2.5 text-sm transition-colors',
+              'group flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-md pr-1 pl-2.5 text-sm transition-all duration-200',
               vertical ? 'w-full' : 'max-w-[220px]',
               activeTab ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent hover:text-foreground',
             )}

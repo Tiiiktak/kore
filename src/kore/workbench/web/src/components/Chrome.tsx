@@ -26,8 +26,9 @@ export function Chrome({ version, orientation }: { version?: string; orientation
 
   return (
     <nav
+      key={orientation}
       className={cn(
-        'bg-background flex shrink-0',
+        'bg-background flex shrink-0 [animation:navIn_.22s_ease-out]',
         left ? 'w-[228px] flex-col gap-1 border-r p-2' : 'h-[46px] items-center gap-2 border-b px-2',
       )}
     >

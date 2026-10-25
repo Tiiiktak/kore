@@ -20,7 +20,7 @@ export function StatusDot({ state, className }: { state: string; className?: str
   return (
     <span
       className={cn(
-        'relative inline-block size-2 shrink-0 rounded-full',
+        'relative inline-block size-2 shrink-0 rounded-full transition-[background-color,box-shadow,color] duration-300',
         m.pulse && 'kore-pulse',
         m.blink && 'kore-blink',
         className,
