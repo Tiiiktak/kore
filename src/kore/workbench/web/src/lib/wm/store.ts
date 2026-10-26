@@ -259,6 +259,17 @@ export const wmStore = {
     emit()
   },
 
+  // Point a terminal window at a tmux window (and optionally a pane within it). undefined =
+  // the session's active window / that window's active pane. Picking a window clears any pane.
+  // Keeps the rest of the window state; the terminal re-subscribes on the change.
+  setWindow(winId: string, window: number | undefined, pane?: number | undefined) {
+    const w = state.wins[winId]
+    if (!w || w.type !== 'term') return
+    if (w.state.window === window && w.state.pane === pane) return
+    w.state = { ...w.state, window, pane }
+    emit()
+  },
+
   split(winId: string, dir: 'row' | 'col'): string | null {
     const ws = active()
     const lf = leafOf(ws.root, winId)

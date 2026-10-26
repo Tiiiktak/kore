@@ -3,6 +3,7 @@ import { Chrome } from '@/components/Chrome'
 import { Overview, type OpenPayload } from '@/components/overview/Overview'
 import { WmStage } from '@/components/wm/WmStage'
 import { CommandPalette } from '@/components/CommandPalette'
+import { TmuxLeaderMenu } from '@/components/wm/TmuxLeaderMenu'
 import { RosterProvider, useRosterCtx } from '@/lib/roster-context'
 import { useWmVersion, wmStore } from '@/lib/wm/store'
 import { useTabSide } from '@/lib/layout'
@@ -84,6 +85,7 @@ function Shell() {
         {content}
       </div>
       <CommandPalette />
+      <TmuxLeaderMenu />
     </>
   )
 }

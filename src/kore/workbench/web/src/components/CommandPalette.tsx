@@ -6,12 +6,15 @@ import {
   Plus,
   Rows2,
   SplitSquareHorizontal,
+  SquareStack,
   TerminalSquare,
+  X,
 } from 'lucide-react'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { useRosterCtx } from '@/lib/roster-context'
 import { buildNodes, emptyLabels, nodeName, sessName } from '@/lib/kore'
 import { wmStore } from '@/lib/wm/store'
+import { focusedTerm, tmuxManage } from '@/lib/wm/tmux'
 import { cn } from '@/lib/utils'
 
 interface Item {
@@ -69,6 +72,17 @@ export function CommandPalette() {
         { id: 'splitcol', group: '操作', label: '上下分屏（当前窗口）', icon: Rows2, keywords: 'split col shangxia fenping', run: () => wmStore.split(focused, 'col') },
         { id: 'web', group: '当前窗口', label: '改为浏览器窗口', icon: Globe, keywords: 'browser web liulanqi', run: () => wmStore.setWin(focused, 'web', {}) },
         { id: 'reset', group: '当前窗口', label: '清空重选（终端 / 浏览器 / 文件）', icon: TerminalSquare, keywords: 'reset empty qingkong', run: () => wmStore.setWin(focused, 'term', {}) },
+      )
+    }
+    // tmux window/pane management — only when the focused window is a live terminal (approach A;
+    // the same actions as the ⌃⇧A leader menu, shown here with their shortcuts).
+    if (focusedTerm()) {
+      list.push(
+        { id: 'tmnew', group: 'tmux', label: '新建 tmux 窗口', sub: '⌃⇧A c', icon: Plus, keywords: 'tmux new window xinjian chuangkou', run: () => void tmuxManage({ action: 'new-window' }) },
+        { id: 'tmsplith', group: 'tmux', label: 'tmux 左右分屏', sub: '⌃⇧A s', icon: Columns2, keywords: 'tmux split horizontal zuoyou fenping', run: () => void tmuxManage({ action: 'split-window', dir: 'h' }) },
+        { id: 'tmsplitv', group: 'tmux', label: 'tmux 上下分屏', sub: '⌃⇧A v', icon: Rows2, keywords: 'tmux split vertical shangxia fenping', run: () => void tmuxManage({ action: 'split-window', dir: 'v' }) },
+        { id: 'tmkill', group: 'tmux', label: '关闭 tmux 窗口', sub: '⌃⇧A &', icon: X, keywords: 'tmux kill window guanbi chuangkou', run: () => void tmuxManage({ action: 'kill-window' }) },
+        { id: 'tmwins', group: 'tmux', label: '窗口 / 分屏切换（⌃⇧A 或右上角）', sub: '⌃⇧A', icon: SquareStack, keywords: 'tmux window pane switch qiehuan', run: () => {} },
       )
     }
     s.workspaces.forEach((ws, i) => {

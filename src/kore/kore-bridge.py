@@ -698,9 +698,15 @@ def kore_list(node_ip: str | None = None, with_summary: bool = True) -> dict[str
     sessions: list[dict[str, Any]] = []
     unreachable: list[str] = []
 
+    # One formatted list-sessions per node yields names AND the active-pane facts we surface on
+    # the cards (window/pane counts, current command, live cwd, pane title) — same `-F` pattern
+    # as list_unmanaged. Tab-separated; pane_title is last so a stray tab in it can't shift the
+    # earlier fields. The active-pane context is what tmux evaluates `#{...}` against here.
+    _LIST_FMT = ("#{session_name}\t#{session_windows}\t#{window_panes}\t"
+                 "#{pane_current_command}\t#{pane_current_path}\t#{pane_title}")
     for ip in targets:
         try:
-            r = sh(ip, f"tmux list-sessions 2>/dev/null | grep '^{TMUX_PREFIX}' || echo NONE", 20)
+            r = sh(ip, f"tmux list-sessions -F '{_LIST_FMT}' 2>/dev/null | grep '^{TMUX_PREFIX}' || echo NONE", 20)
         except Exception as exc:  # noqa: BLE001 - one bad node must not hide the rest
             unreachable.append(ip)
             log(f"list: {ip} unreachable: {exc!r}")
@@ -710,9 +716,16 @@ def kore_list(node_ip: str | None = None, with_summary: bool = True) -> dict[str
         facts = jm.get(ip, {})
         states = node_hook_states(ip)   # one round-trip; hook records for all this node's sessions
         for line in r["stdout"].strip().splitlines():
-            name = line.split(":")[0].strip()
+            parts = line.split("\t")
+            name = parts[0].strip()
             if not name:
                 continue
+            windows = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+            panes = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+            command = parts[3] if len(parts) > 3 else ""
+            live_cwd = parts[4] if len(parts) > 4 else ""
+            title = "\t".join(parts[5:]) if len(parts) > 5 else ""
+
             pane = ""
             try:
                 pane = capture(ip, name, 40)
@@ -726,6 +739,12 @@ def kore_list(node_ip: str | None = None, with_summary: bool = True) -> dict[str
                 "role": (reg.get(name) or {}).get("role", ""),
                 "cwd": (reg.get(name) or {}).get("cwd", ""),
                 "state": session_state(ip, name, pane, states),
+                # live tmux facts for the overview cards (active pane of the active window)
+                "windows": windows,
+                "panes": panes,
+                "command": command,
+                "live_cwd": live_cwd,
+                "title": title,
             }
             # Surface the hook record's idle-stretch identity so the board can show a one-shot
             # "刚干完，去看看" indicator that clears once the user opens the session. `since`
@@ -744,6 +763,102 @@ def kore_list(node_ip: str | None = None, with_summary: bool = True) -> dict[str
     if unreachable:
         result["unreachable_nodes"] = unreachable
     return result
+
+
+def list_windows(node_ip: str, name: str) -> dict[str, Any]:
+    """The tmux windows of one session (for the dashboard's window switcher). Read-only."""
+    ip = validate_ip(node_ip)
+    full = norm_name(name)
+    fmt = "#{window_index}\t#{window_name}\t#{window_active}\t#{window_panes}"
+    r = sh(ip, f"tmux list-windows -t {full} -F '{fmt}' 2>/dev/null || echo NONE", 20)
+    out = r["stdout"]
+    wins: list[dict[str, Any]] = []
+    if "NONE" not in out:
+        for line in out.strip().splitlines():
+            p = line.split("\t")
+            if len(p) < 4 or not p[0].isdigit():
+                continue
+            wins.append({"index": int(p[0]), "name": p[1], "active": p[2] == "1",
+                         "panes": int(p[3]) if p[3].isdigit() else 1})
+    return {"ok": True, "node_ip": ip, "name": full, "windows": wins}
+
+
+def list_panes(node_ip: str, name: str, window: int) -> dict[str, Any]:
+    """The panes of one tmux window, with geometry, for the pane switcher AND the composite
+    split view. Read-only. `window` is an int. Geometry is in cells, relative to the window;
+    `win_cols`/`win_rows` let the dashboard lay the panes out proportionally."""
+    ip = validate_ip(node_ip)
+    full = norm_name(name)
+    w = int(window)
+    # command/title last-but-geometry: put the free-text title LAST so a stray tab can't shift
+    # the numeric geometry fields.
+    fmt = ("#{pane_index}\t#{pane_active}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t"
+           "#{pane_height}\t#{window_width}\t#{window_height}\t#{pane_current_command}\t#{pane_title}")
+    r = sh(ip, f"tmux list-panes -t {full}:{w:d} -F '{fmt}' 2>/dev/null || echo NONE", 20)
+    out = r["stdout"]
+    panes: list[dict[str, Any]] = []
+    win_cols = win_rows = 0
+    def _int(s: str) -> int:
+        return int(s) if s.lstrip("-").isdigit() else 0
+    if "NONE" not in out:
+        for line in out.strip().splitlines():
+            p = line.split("\t")
+            if len(p) < 8 or not p[0].isdigit():
+                continue
+            win_cols, win_rows = _int(p[6]), _int(p[7])
+            panes.append({"index": int(p[0]), "active": p[1] == "1",
+                          "left": _int(p[2]), "top": _int(p[3]), "width": _int(p[4]), "height": _int(p[5]),
+                          "command": p[8] if len(p) > 8 else "",
+                          "title": "\t".join(p[9:]) if len(p) > 9 else ""})
+    return {"ok": True, "node_ip": ip, "name": full, "window": w,
+            "win_cols": win_cols, "win_rows": win_rows, "panes": panes}
+
+
+_WIN_NAME_RE = re.compile(r"^[A-Za-z0-9_.\- ]{1,40}$")
+
+
+def tmux_manage(node_ip: str, name: str, action: str, window: int | None = None,
+                pane: int | None = None, title: str = "", direction: str = "h",
+                cols: int | None = None, rows: int | None = None) -> dict[str, Any]:
+    """Run ONE allowlisted tmux window/pane management command. Targets are built from the
+    NAME-checked session plus integer window/pane (via %d), and a window name is char-checked
+    and single-quoted — nothing caller-supplied reaches the shell unquoted or unchecked."""
+    ip = validate_ip(node_ip)
+    full = norm_name(name)
+    wt = f"{full}:{int(window)}" if window is not None else full
+    pt = f"{full}:{int(window)}.{int(pane)}" if (window is not None and pane is not None) else wt
+    if action == "new-window":
+        cmd = f"tmux new-window -t {full}"
+        if title:
+            if not _WIN_NAME_RE.match(title):
+                return {"ok": False, "error": f"bad window name {title!r}"}
+            cmd += f" -n '{title}'"
+    elif action == "kill-window":
+        cmd = f"tmux kill-window -t {wt}"
+    elif action == "rename-window":
+        if not _WIN_NAME_RE.match(title):
+            return {"ok": False, "error": f"bad window name {title!r}"}
+        cmd = f"tmux rename-window -t {wt} '{title}'"
+    elif action == "split-window":
+        flag = "-v" if direction == "v" else "-h"
+        cmd = f"tmux split-window {flag} -t {pt}"
+    elif action == "kill-pane":
+        cmd = f"tmux kill-pane -t {pt}"
+    elif action == "resize-pane":
+        parts = []
+        if cols is not None:
+            parts.append(f"-x {int(cols):d}")
+        if rows is not None:
+            parts.append(f"-y {int(rows):d}")
+        if not parts:
+            return {"ok": False, "error": "resize-pane needs cols and/or rows"}
+        cmd = f"tmux resize-pane -t {pt} {' '.join(parts)}"
+    else:
+        return {"ok": False, "error": f"bad action {action!r}"}
+    r = sh(ip, cmd + " 2>&1", 20)
+    rc = int(r.get("rc") or 0)
+    return {"ok": rc == 0, "action": action,
+            "error": "" if rc == 0 else (r.get("stdout") or "").strip()[:200]}
 
 
 def kore_start(node_ip: str, name: str, cwd: str = "~", role: str = "", claude_path: str = "") -> dict[str, Any]:

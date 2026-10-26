@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import '@xterm/xterm/css/xterm.css'
 import { createKoreTerminal, type KoreTerminal } from '@/lib/term/terminal'
 import { MobileInput } from './MobileInput'
@@ -14,17 +14,23 @@ export function TerminalView({
   name,
   writable,
   winId,
+  window: tmuxWindow,
+  pane: tmuxPane,
   focused = true,
   mobile = false,
   reloadKey = 0,
+  statusBar,
 }: {
   nodeIp: string
   name: string
   writable: boolean
   winId: string
+  window?: number
+  pane?: number
   focused?: boolean
   mobile?: boolean
   reloadKey?: number
+  statusBar?: ReactNode
 }) {
   const hostRef = useRef<HTMLDivElement>(null)
   const engineRef = useRef<KoreTerminal | null>(null)
@@ -38,7 +44,7 @@ export function TerminalView({
     const host = hostRef.current
     if (!host) return
     setReady(false)
-    const engine = createKoreTerminal(host, { node_ip: nodeIp, name, writable }, setStatus, winId, setCtrlArmed, () => setReady(true))
+    const engine = createKoreTerminal(host, { node_ip: nodeIp, name, writable, window: tmuxWindow, pane: tmuxPane }, setStatus, winId, setCtrlArmed, () => setReady(true))
     engineRef.current = engine
     // On mobile, keep the window logically focused (so compose/key-row sends pass the input
     // gate) but don't DOM-focus xterm (that would aim the soft keyboard at the wrong surface).
@@ -57,7 +63,7 @@ export function TerminalView({
       engineRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeIp, name, writable, winId, reloadKey])
+  }, [nodeIp, name, writable, winId, tmuxWindow, tmuxPane, reloadKey])
 
   useEffect(() => {
     const e = engineRef.current
@@ -97,6 +103,8 @@ export function TerminalView({
           <div className="pointer-events-none absolute bottom-1 left-2.5 z-[2] font-mono text-[10px] text-[#8a8a8a]">{status}</div>
         )}
       </div>
+      {/* status bar sits ABOVE the mobile key row (which floats on top of the soft keyboard) */}
+      {statusBar}
       {mobile && writable && (
         <MobileInput
           send={(d) => engineRef.current?.send(d)}

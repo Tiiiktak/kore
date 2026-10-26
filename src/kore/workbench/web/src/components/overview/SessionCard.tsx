@@ -68,6 +68,12 @@ export function SessionCard({
     .filter((l) => l.trim())
     .join('\n')
   const meta = [s.job_name, s.gpus ? `${s.gpus} GPU` : '', s.role].filter(Boolean).join(' · ')
+  // live tmux facts: a window/pane count badge (only when there's more than one — a hint that
+  // this session has tabs/splits worth opening) and the active pane's current directory.
+  const wp = [s.windows && s.windows > 1 ? `${s.windows} 窗口` : '', s.panes && s.panes > 1 ? `${s.panes} 分屏` : '']
+    .filter(Boolean)
+    .join(' · ')
+  const cwd = s.live_cwd || s.cwd || ''
 
   return (
     <div
@@ -142,10 +148,16 @@ export function SessionCard({
         <div className="text-muted-foreground/60 mt-2 flex-1 text-[12px]">—</div>
       )}
 
-      {(meta || lock) && (
+      {(meta || lock || wp || cwd) && (
         <div className="mt-1.5 flex items-center gap-1.5">
           {lock && <span className="text-brand bg-brand-bg shrink-0 rounded px-1.5 py-0.5 text-[10px]">{lock}</span>}
-          {meta && <span className="text-muted-foreground min-w-0 truncate text-[11px]">{meta}</span>}
+          {wp && <span className="text-muted-foreground bg-muted shrink-0 rounded px-1.5 py-0.5 text-[10px]">{wp}</span>}
+          {meta && <span className="text-muted-foreground min-w-0 shrink truncate text-[11px]">{meta}</span>}
+          {cwd && (
+            <span className="text-muted-foreground/70 ml-auto min-w-0 max-w-[55%] shrink-0 truncate pl-1 font-mono text-[10px] [direction:rtl]">
+              {cwd}
+            </span>
+          )}
         </div>
       )}
     </div>

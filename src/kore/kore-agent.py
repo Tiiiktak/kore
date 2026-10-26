@@ -142,11 +142,24 @@ def list_kore_sessions() -> list[str]:
 
 
 class PaneTap:
-    def __init__(self, session: str, hist_lines: int, max_bytes: int):
+    def __init__(self, session: str, hist_lines: int, max_bytes: int, window: int | None = None, pane: int | None = None):
         import re as _re
         import threading
 
         self.session = session
+        # Optional tmux window/pane indices. The control-mode attach stays session-scoped (it
+        # already delivers %output for every pane in every window); window/pane only scope the
+        # probe + capture to that pane. None = the session's active window / active pane. A
+        # pane index needs a window to address, so it's ignored without one.
+        self.window = int(window) if window is not None else None
+        # pane INDEX (addressing); distinct from self.pane below, which holds the probed
+        # pane-ID ("%5") used to demux %output. A pane index needs a window.
+        self.pane_idx = int(pane) if (pane is not None and self.window is not None) else None
+        self.tgt = session
+        if self.window is not None:
+            self.tgt += f":{self.window}"
+            if self.pane_idx is not None:
+                self.tgt += f".{self.pane_idx}"
         self.hist_lines = int(hist_lines)
         self.max_bytes = int(max_bytes)
         # `%output` escaping: any byte tmux will not put on a line verbatim becomes a
@@ -179,7 +192,7 @@ class PaneTap:
         """Which pane is on screen, how big, where the cursor is — in one call, so
         the five numbers cannot disagree with each other."""
         rc, out, _ = self._tmux(
-            "display-message", "-p", "-t", self.session,
+            "display-message", "-p", "-t", self.tgt,
             "#{pane_id} #{pane_width} #{pane_height} #{cursor_x} #{cursor_y} "
             "#{?alternate_on,1,0}")
         if rc != 0:
@@ -219,7 +232,7 @@ class PaneTap:
         out = bytearray()
         replayed = False
         if hist and self.hist_lines > 0 and not pr["alt"]:
-            rc, old, _ = self._tmux("capture-pane", "-e", "-p", "-t", self.session,
+            rc, old, _ = self._tmux("capture-pane", "-e", "-p", "-t", self.tgt,
                                     "-S", f"-{self.hist_lines}", "-E", "-1")
             if rc == 0 and old.strip():
                 lines = old.split(b"\n")
@@ -229,7 +242,7 @@ class PaneTap:
                 replayed = True
         if not replayed:
             out += b"\x1b[H\x1b[2J"  # erase the viewport, keep the scrollback
-        rc, screen, _ = self._tmux("capture-pane", "-e", "-p", "-t", self.session,
+        rc, screen, _ = self._tmux("capture-pane", "-e", "-p", "-t", self.tgt,
                                    "-S", "0", "-E", "-")
         lines = screen.split(b"\n") if rc == 0 else []
         if lines and lines[-1] == b"":
@@ -762,6 +775,10 @@ class Handler(BaseHTTPRequestHandler):
                                     "error": f"bad session name {session!r}"})
         hist = int((q.get("hist") or ["400"])[0] or "400")
         max_bytes = int((q.get("max_bytes") or ["262144"])[0] or "262144")
+        win_raw = (q.get("window") or [""])[0]
+        window = int(win_raw) if win_raw.isdigit() else None
+        pane_raw = (q.get("pane") or [""])[0]
+        pane = int(pane_raw) if pane_raw.isdigit() else None
 
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -770,7 +787,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")  # no proxy may batch the frames
         self.end_headers()
 
-        pane = PaneTap(session, hist, max_bytes)
+        tap = PaneTap(session, hist, max_bytes, window=window, pane=pane)
         last_beat = time.time()
 
         def emit(kind: str, payload: str = "") -> bool:
@@ -785,7 +802,7 @@ class Handler(BaseHTTPRequestHandler):
                 return False
 
         try:
-            res = pane.start()
+            res = tap.start()
             if not res.get("ok"):
                 emit("e", str(res.get("error") or "attach 失败，没说为什么"))
                 return
@@ -795,7 +812,7 @@ class Handler(BaseHTTPRequestHandler):
                     "o", base64.b64encode(res["paint"]).decode("ascii")):
                 return
             while True:
-                got = pane.pull(TAP_PULL_WAIT_S)
+                got = tap.pull(TAP_PULL_WAIT_S)
                 if got.get("geom") and not emit("g", got["geom"]):
                     return
                 data = got.get("bytes") or b""
@@ -822,7 +839,7 @@ class Handler(BaseHTTPRequestHandler):
             # The browser closed -> the bridge closed its response -> our next write got
             # BrokenPipe -> here. Closing the pane kills the local `tmux -C attach -r`, so
             # the thing this stream borrowed is gone now, not whenever something notices.
-            pane.close()
+            tap.close()
             try:
                 self.wfile.write(b"0\r\n\r\n")  # terminating chunk, best effort
                 self.wfile.flush()

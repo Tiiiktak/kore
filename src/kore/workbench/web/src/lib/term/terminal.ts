@@ -21,6 +21,8 @@ export interface TermSession {
   node_ip: string
   name: string
   writable: boolean
+  window?: number // optional tmux window index (undefined = the session's active window)
+  pane?: number // optional tmux pane index within window (undefined = that window's active pane)
 }
 export interface KoreTerminal {
   focus(domFocus?: boolean): void
@@ -129,7 +131,7 @@ export function createKoreTerminal(
   onReady: () => void = () => {},
 ): KoreTerminal {
   const s = session
-  const id = winId + '|' + s.node_ip + '/' + s.name
+  const id = winId + '|' + s.node_ip + '/' + s.name + (s.window != null ? '#' + s.window + (s.pane != null ? '.' + s.pane : '') : '')
 
   let fit: FitAddon | null = null
   let webgl: WebglAddon | null = null
@@ -197,6 +199,9 @@ export function createKoreTerminal(
   }
 
   function fitGeom() {
+    // Pane mode never resizes: panes in a window share its geometry, so fitting one pane to
+    // the browser box would reflow the user's whole tmux layout. Display the pane as-is.
+    if (s.pane != null) return
     if (!far || !s.writable) return
     const box = boxDims()
     if (!box) return
@@ -206,7 +211,7 @@ export function createKoreTerminal(
     geomAsked = key
     geomBusy = true
     borrowed = true
-    kPost('resize', { node_ip: s.node_ip, name: s.name, cols: box.cols, rows: box.rows })
+    kPost('resize', { node_ip: s.node_ip, name: s.name, cols: box.cols, rows: box.rows, window: s.window })
       .catch((e: Error) => {
         geomAsked = ''
         say('贴合失败（可滚动看全）：' + e.message)
@@ -218,12 +223,12 @@ export function createKoreTerminal(
   function release() {
     const box = boxDims() || far
     geomAsked = ''
-    if (!borrowed || !box || !s.writable) {
+    if (s.pane != null || !borrowed || !box || !s.writable) {
       borrowed = false
       return
     }
     borrowed = false
-    kPost('resize', { node_ip: s.node_ip, name: s.name, cols: box.cols, rows: box.rows, auto: true }).catch(() => {})
+    kPost('resize', { node_ip: s.node_ip, name: s.name, cols: box.cols, rows: box.rows, auto: true, window: s.window }).catch(() => {})
   }
 
   function applyTerm(f: Frame) {
@@ -288,6 +293,8 @@ export function createKoreTerminal(
       node_ip: s.node_ip,
       name: s.name,
       hex: batch.join(' '),
+      window: s.window,
+      pane: s.pane,
       ...(tap ? { echo: false } : {}),
     })
       .then((d) => {
@@ -363,6 +370,8 @@ export function createKoreTerminal(
       fitGeom()
     }
     kws.sub(id, s.node_ip, s.name, {
+      window: s.window,
+      pane: s.pane,
       prime: (d) => {
         seen()
         if (got) return
@@ -432,6 +441,8 @@ export function createKoreTerminal(
     wire = 'screen'
     const url =
       `/api/kore/stream?node_ip=${encodeURIComponent(s.node_ip)}&name=${encodeURIComponent(s.name)}&lines=400&mode=term` +
+      (s.window != null ? `&window=${s.window}` : '') +
+      (s.pane != null ? `&pane=${s.pane}` : '') +
       (TOKEN ? `&token=${encodeURIComponent(TOKEN)}` : '')
     const es = new EventSource(url)
     stream = es

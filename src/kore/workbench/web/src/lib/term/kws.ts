@@ -15,6 +15,8 @@ export interface KwsHandlers {
   _up?: () => void
   node_ip?: string
   name?: string
+  window?: number // optional tmux window index (undefined = the session's active window)
+  pane?: number // optional tmux pane index within window (undefined = that window's active pane)
 }
 
 function makeKws() {
@@ -46,7 +48,7 @@ function makeKws() {
       connected = true
       backoff = 500
       for (const [id, h] of subs) {
-        rawsend({ t: 'sub', id, node_ip: h.node_ip, name: h.name })
+        rawsend({ t: 'sub', id, node_ip: h.node_ip, name: h.name, window: h.window, pane: h.pane })
         h._up?.()
       }
     }
@@ -107,7 +109,7 @@ function makeKws() {
       handlers.name = name
       subs.set(id, handlers)
       connect()
-      rawsend({ t: 'sub', id, node_ip, name })
+      rawsend({ t: 'sub', id, node_ip, name, window: handlers.window, pane: handlers.pane })
     },
     unsub(id: string) {
       if (subs.delete(id)) rawsend({ t: 'unsub', id })

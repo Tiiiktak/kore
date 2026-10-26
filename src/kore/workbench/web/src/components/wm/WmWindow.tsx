@@ -6,6 +6,9 @@ import { BrowserView } from './BrowserView'
 import { FilesView } from './FilesView'
 import { Launcher } from './Launcher'
 import { QuickSwitch } from './QuickSwitch'
+import { WindowSwitcher } from './WindowSwitcher'
+import { PaneGrid } from './PaneGrid'
+import { TmuxStatusBar } from './TmuxStatusBar'
 import { Hint } from '@/components/Hint'
 import { wmStore, winSub, winTitle } from '@/lib/wm/store'
 import { WM_MIN_H, WM_MIN_W, type Rect } from '@/lib/wm/tree'
@@ -21,6 +24,14 @@ export function WmWindow({ rect, active, mobile = false }: { rect: Rect; active:
   const isEmpty = isTerm && !win.state.node_ip
   const canRow = mobile || rect.w >= 2 * WM_MIN_W + 6
   const canCol = mobile || rect.h >= 2 * WM_MIN_H + 6
+
+  // tmux-style status bar (session name + window tabs + clock). Rendered INSIDE the terminal
+  // subtree — above the mobile key row, not below it — so the key row stays pinned to the
+  // bottom edge / soft keyboard. Terminals only.
+  const statusBar =
+    isTerm && !isEmpty ? (
+      <TmuxStatusBar winId={rect.win} nodeIp={win.state.node_ip} name={win.state.name} label={winTitle(win)} window={win.state.window} />
+    ) : null
 
   return (
     <div
@@ -48,6 +59,9 @@ export function WmWindow({ rect, active, mobile = false }: { rect: Rect; active:
           </PopoverContent>
         </Popover>
 
+        {isTerm && !isEmpty && (
+          <WindowSwitcher nodeIp={win.state.node_ip} name={win.state.name} winId={rect.win} current={win.state.window} currentPane={win.state.pane} />
+        )}
         {isTerm && !isEmpty && (
           <Hint label="重连">
             <button
@@ -101,15 +115,32 @@ export function WmWindow({ rect, active, mobile = false }: { rect: Rect; active:
       <div className="relative min-h-0 flex-1">
         {isEmpty ? (
           <Launcher winId={rect.win} />
+        ) : isTerm && win.state.window != null && win.state.pane == null ? (
+          // A window is selected without pinning one pane → mirror the whole window (all panes
+          // laid out by tmux geometry). reloadKey remounts via key.
+          <PaneGrid
+            key={reloadKey}
+            winId={rect.win}
+            nodeIp={win.state.node_ip}
+            name={win.state.name}
+            window={win.state.window}
+            writable={win.state.writable}
+            focused={active}
+            mobile={mobile}
+            statusBar={statusBar}
+          />
         ) : isTerm ? (
           <TerminalView
             nodeIp={win.state.node_ip}
             name={win.state.name}
             writable={win.state.writable}
             winId={rect.win}
+            window={win.state.window}
+            pane={win.state.pane}
             focused={active}
             mobile={mobile}
             reloadKey={reloadKey}
+            statusBar={statusBar}
           />
         ) : win.type === 'web' ? (
           <BrowserView winId={rect.win} url={win.state.url} />

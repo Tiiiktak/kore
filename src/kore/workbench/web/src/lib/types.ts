@@ -15,8 +15,14 @@ export interface Session {
   job_name?: string
   gpus?: number
   role?: string
-  cwd?: string
+  cwd?: string // create-time value from the registry (often stale); prefer live_cwd
   summary?: string
+  // live tmux facts (active pane of the active window), surfaced on the overview cards
+  windows?: number // number of tmux windows in the session
+  panes?: number // number of panes in the active window
+  command?: string // active pane's current command (e.g. "claude", "vim")
+  title?: string // active pane title
+  live_cwd?: string // active pane's current directory (fresh, unlike cwd)
 }
 
 export interface NodeInfo {

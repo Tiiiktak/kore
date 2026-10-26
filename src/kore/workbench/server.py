@@ -93,6 +93,7 @@ PORT = int(os.environ.get("WB_PORT", "8198"))
 # /api/kore/streams 槽位池。鉴权没有任何松动 —— 从哪个口进来都走 _validate。
 ALSO = [int(p) for p in (os.environ.get("WB_PORT_ALSO") or "").replace(",", " ").split()]
 HERE = os.path.dirname(os.path.abspath(__file__))
+
 TOKEN_FILE = os.environ.get("WB_TOKEN_FILE", os.path.join(HERE, ".token"))
 KORE_OPS_PATH = os.environ.get("KORE_OPS_PATH", os.path.join(os.path.dirname(HERE), "koreops.py"))
 MAX_BODY = 128 * 1024
@@ -996,10 +997,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                   # you can only see by holding an SSE connection open is a frame shape
                   # nobody checks.
                   "ansi": one("ansi", "") in ("1", "true", "yes"),
-                  "screen": one("screen", "") in ("1", "true", "yes")} \
+                  "screen": one("screen", "") in ("1", "true", "yes"),
+                  "window": one("window"), "pane": one("pane")} \
                 if verb == "read" else {}
             self._json(200, koreops.read_verb(verb, one("node_ip"), one("name"),
                                             who=self._who(), **kw))
+        elif path == "/api/kore/windows":
+            # Read-only: the tmux windows of one session, for the window switcher. Same
+            # node_ip + name addressing as /api/kore/read; no `session=` vocabulary.
+            self._json(200, koreops.list_windows(one("node_ip"), one("name")))
+        elif path == "/api/kore/panes":
+            # Read-only: the panes of one tmux window (node_ip + name + window).
+            self._json(200, koreops.list_panes(one("node_ip"), one("name"), one("window")))
         elif path == "/api/kore/streams":
             # Observability for the cap, and the only way a test can prove a feed was
             # released rather than merely stopped being watched: open a pane -> 1,
@@ -1015,13 +1024,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # `session` parameter (that is the observe half's vocabulary) keep holding
             # without a word of rewording.
             self._sse_stream(one("node_ip"), one("name"),
-                             _qint(one("lines"), 400, 1, 5000), one("mode", "lines"))
+                             _qint(one("lines"), 400, 1, 5000), one("mode", "lines"),
+                             one("window") or None, one("pane") or None)
         elif path == "/api/kore/bytes":
             # ROUND10: the same pane, addressed the same two ways (node_ip + name, never
             # ?session=), streamed as bytes instead of as screens. A separate path rather
             # than a third `mode=` on /api/kore/stream because nothing is shared: no capture,
             # no diff, no tick, no baseline table — one `koreops.py tap` child and a relay.
-            self._sse_bytes(one("node_ip"), one("name"))
+            self._sse_bytes(one("node_ip"), one("name"), one("window"), one("pane"))
         elif path == "/api/agents":
             # Read-only observability for the client-agent registry: which clients the
             # engine currently believes are reachable, pruned by TTL so the dashboard sees
@@ -1118,7 +1128,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except OSError:
             return True
 
-    def _sse_stream(self, node_ip: str, name: str, lines: int, mode: str = "lines") -> None:
+    def _sse_stream(self, node_ip: str, name: str, lines: int, mode: str = "lines", window: int | None = None, pane: int | None = None) -> None:
         """One open pane: capture, diff against what this client has already been sent,
         push only the difference, repeat ~1s.
 
@@ -1198,9 +1208,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Not two: `read_verb` is the single koreops entry this whole code path is
                 # allowed to name, and a second call site is a second place for a write
                 # symbol to turn up later.
-                want = {"lines": lines}
+                want = {"lines": lines, "window": window, "pane": pane}
                 if term:
-                    want = {"lines": lines, "ansi": True, "screen": not first}
+                    want = {"lines": lines, "ansi": True, "screen": not first, "window": window, "pane": pane}
                 # ROUND9 方案 C②的另一半：节奏提到 0.13s 之后，光提节奏没用 —— koreops 那边
                 # 对 read 有 read_cache_s=0.5 的缓存，0.13s 一拍里有四拍会原地拿回同一张旧
                 # 屏，「高频纠正」就成了高频重复。max_age 把这一拍能接受的最大年龄说出来：
@@ -1322,7 +1332,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with _stream_mu:
                 _streams_open -= 1
 
-    def _sse_bytes(self, node_ip: str, name: str) -> None:
+    def _sse_bytes(self, node_ip: str, name: str, window: int | None = None, pane: int | None = None) -> None:
         """One open pane, as BYTES. The feed with no tick in it.
 
         `/api/kore/stream` asks the far side for a *screen* on a cadence and ships the
@@ -1364,6 +1374,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not node_ip or not name:
             self._json(400, {"ok": False, "error": "bytes needs node_ip and name"})
             return
+        if isinstance(window, str):
+            window = int(window) if window.isdigit() else None
+        if isinstance(pane, str):
+            pane = int(pane) if pane.isdigit() else None
+        if window is None:
+            pane = None  # a pane index needs a window
         # Two caps, and the smaller wins: MAX_STREAMS counts open pane feeds on this
         # board, `tap_max_streams` counts resident processes this board may hold on
         # somebody else's node. The second is the one that costs them something.
@@ -1381,8 +1397,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # client can't pin this thread + the tap child indefinitely.
             self.connection.settimeout(STREAM_WRITE_TIMEOUT_S)
             self._sse_open()
-            self._tap_prime(node_ip, name)
-            child = koreops.tap_spawn(node_ip, name, who=self._who())
+            self._tap_prime(node_ip, name, window, pane)
+            child = koreops.tap_spawn(node_ip, name, window=window, pane=pane, who=self._who())
             lines: queue.Queue = queue.Queue()
 
             def drain(fh, q: queue.Queue) -> None:
@@ -1442,7 +1458,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with _stream_mu:
                 _streams_open -= 1
 
-    def _tap_prime(self, node_ip: str, name: str) -> None:
+    def _tap_prime(self, node_ip: str, name: str, window: int | None = None, pane: int | None = None) -> None:
         """The blank-pane patch: one cached capture, so something is on screen in ~20ms.
 
         Screen only, no scrollback (`screen: True`): the tap's own first paint carries the
@@ -1453,7 +1469,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         """
         try:
             r = koreops.read_verb("read", node_ip, name, who=self._who(),
-                                lines=400, ansi=True, screen=True)
+                                lines=400, ansi=True, screen=True, window=window, pane=pane)
         except Exception:                        # noqa: BLE001 - best effort, by design
             return
         if r.get("ok"):
@@ -1538,12 +1554,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         def send_json(obj) -> bool:
             return ws_send(0x1, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
-        def start_sub(sid, node_ip, name) -> None:
+        def start_sub(sid, node_ip, name, window=None, pane=None) -> None:
             global _streams_open
             if (not isinstance(sid, str) or not sid or not _IP_RE.match(str(node_ip))
                     or not _WS_NAME_RE.match(str(name))):
                 send_json({"t": "err", "id": sid, "error": "bad subscription"})
                 return
+            # optional tmux window/pane indices (their own fields — the name regex forbids ':')
+            def _idx(v):
+                try:
+                    iv = int(v) if v is not None and str(v) != "" else None
+                except (TypeError, ValueError):
+                    return None
+                return iv if (iv is not None and 0 <= iv < 1000) else None
+            win = _idx(window)
+            pane_i = _idx(pane) if win is not None else None  # a pane needs a window
             cap = min(MAX_STREAMS, int(koreops.policy().get("tap_max_streams", 8) or 8))
             # Decide and reserve UNDER the locks; send and spawn OUTSIDE them. send_json is a
             # blocking socket write — doing it while holding the process-global _stream_mu
@@ -1570,7 +1595,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             try:
                 threading.Thread(target=self._ws_sub,
-                                 args=(sid, node_ip, name, stop, subs, subs_mu, send_json),
+                                 args=(sid, node_ip, name, win, pane_i, stop, subs, subs_mu, send_json),
                                  daemon=True, name=f"wb-ws-{sid[:24]}").start()
             except RuntimeError:
                 # The thread never started, so its releasing finally never runs — roll back
@@ -1634,7 +1659,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         m = None
                     if isinstance(m, dict):
                         if m.get("t") == "sub":
-                            start_sub(m.get("id"), m.get("node_ip"), m.get("name"))
+                            start_sub(m.get("id"), m.get("node_ip"), m.get("name"), m.get("window"), m.get("pane"))
                         elif m.get("t") == "unsub":
                             stop_sub(m.get("id"))
                 msg_op, msg_buf = 0, bytearray()   # message complete; reset the assembler
@@ -1669,17 +1694,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except OSError:
                 pass
 
-    def _ws_sub(self, sid, node_ip, name, stop, subs, subs_mu, send_json) -> None:
+    def _ws_sub(self, sid, node_ip, name, window, pane, stop, subs, subs_mu, send_json) -> None:
         """One subscription: prime, attach a tap child, relay its bytes as id-tagged frames
         until the client unsubscribes, the socket dies, or the tap ends. Owns the stream
-        counter release and the child teardown for this sub — exactly once, here."""
+        counter release and the child teardown for this sub — exactly once, here. `window`/
+        `pane` optionally scope the feed to a tmux window/pane (None = active)."""
         global _streams_open
         child = None
         try:
             r = None
             try:
                 r = koreops.read_verb("read", node_ip, name, who=self._who(),
-                                      lines=400, ansi=True, screen=True)
+                                      lines=400, ansi=True, screen=True, window=window, pane=pane)
             except Exception:                    # noqa: BLE001 - prime is best-effort
                 r = None
             if r and r.get("ok"):
@@ -1689,7 +1715,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                            "cy": r.get("cursor_y")})
             if stop.is_set():
                 return
-            child = koreops.tap_spawn(node_ip, name, who=self._who())
+            child = koreops.tap_spawn(node_ip, name, window=window, pane=pane, who=self._who())
             with subs_mu:
                 if sid in subs:
                     subs[sid]["child"] = child
@@ -1855,6 +1881,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path in ("/", "/index.html"):
                 # 页面本身不许被缓存住（改页面是常事，而且不能让人看到旧的那一份），但
                 # 带 ETag：内容没变时浏览器拿 304，省掉 166KB 的重传。
+                # One file for everyone — its CSS is downleveled at build time (see
+                # vite.config.ts), so old in-app WebViews (如流 = Chrome 97) and modern
+                # browsers both render it identically.
                 self._send_static(os.path.join(HERE, "index.html"),
                                   "text/html; charset=utf-8", "no-cache")
                 return
@@ -1965,6 +1994,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                # (resize_min/max_cols/rows), not here — this whitelist
                                # decides what MAY be named, never what is valid.
                                "cols", "rows", "auto",
+                               # tmux window / pane index for input + resize targeting. Their
+                               # own fields (the session name forbids ':'); koreops validates
+                               # them to small ints and composes '<session>:<win>.<pane>'.
+                               "window", "pane",
+                               # tmux management (verb "manage"): the allowlisted action, an
+                               # optional window name, and the split direction. koreops
+                               # _validate_params checks action ∈ MANAGE_ACTIONS and the name.
+                               "action", "title", "dir",
                                # R6-DASHBOARD: audit-only provenance ({run_id, round,
                                # task_id}). koreops._clean_origin() shape-checks it and can
                                # never refuse the write, so letting it through this
@@ -1979,7 +2016,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # koreops.input_keys() then runs the same _validate() as every other write.
                 res = koreops.input_keys(node_ip, name, who=self._who(),
                                        hex_keys=str(params.get("hex") or ""),
-                                       echo=bool(params.get("echo", True)))
+                                       echo=bool(params.get("echo", True)),
+                                       window=params.get("window"), pane=params.get("pane"))
                 # 回执这一屏客户端会当 rows 帧铺上去，所以同一个 pane 那条 SSE 线的基线也
                 # 得跟着走一步，否则阶段3 的位移是拿一张过期的屏算的。只读提示，详见
                 # _term_baseline_put；放在 _json 之前是因为下一拍可能比这个响应先到客户端。
@@ -1998,8 +2036,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # 一步（否则下一拍的行 diff 是拿一张旧几何的屏算的）。
                 res = koreops.resize_window(
                     node_ip, name, cols=params.get("cols"), rows=params.get("rows"),
-                    auto=bool(params.get("auto")), who=self._who())
+                    auto=bool(params.get("auto")), window=params.get("window"),
+                    pane=params.get("pane"), who=self._who())
                 _term_baseline_put(node_ip, name, res)
+                self._json(200, res)
+                return
+            if verb == "manage":
+                # tmux window/pane management (rename / new / kill / split). Synchronous like
+                # input/resize; koreops.manage_window runs the same _validate() + ledger.
+                res = koreops.manage_window(
+                    node_ip, name, action=str(params.get("action") or ""),
+                    window=params.get("window"), pane=params.get("pane"),
+                    title=str(params.get("title") or ""), direction=str(params.get("dir") or "h"),
+                    cols=params.get("cols"), rows=params.get("rows"),
+                    who=self._who())
                 self._json(200, res)
                 return
             self._json(202, koreops.submit(verb, node_ip, name, who=self._who(), **params))

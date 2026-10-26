@@ -128,7 +128,13 @@ ROLE_RE = re.compile(r"^[^\x00-\x1f]{0,200}$")
 # refusal (see _clean_origin). These regexes only keep junk out of the audit log.
 ORIGIN_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
-WRITE_VERBS = ("start", "stop", "send", "keys", "input", "resize", "adopt")
+WRITE_VERBS = ("start", "stop", "send", "keys", "input", "resize", "adopt", "manage")
+
+# tmux window-management actions the dashboard may drive (approach A: dashboard actions ->
+# tmux commands, NOT raw Ctrl-b). Allowlisted; anything else is refused by _validate_params.
+MANAGE_ACTIONS = ("new-window", "kill-window", "rename-window", "split-window", "kill-pane", "resize-pane")
+# A tmux window name the dashboard may set: no shell metacharacters, no quotes, no control.
+WIN_NAME_RE = re.compile(r"^[A-Za-z0-9_.\- ]{1,40}$")
 """Every verb that can change something on a remote host. Membership here is what makes
 `_validate()` run (nodes / deny_nodes / protected_sessions / verbs) and what `do_POST`
 checks before it will route a request at all — so a new write verb that is NOT in this
@@ -157,7 +163,7 @@ DEFAULT_POLICY: dict[str, Any] = {
     # a dashboard click must never start or kill processes on) without a code change.
     "deny_nodes": [],
     "verbs": {"start": True, "stop": True, "send": True, "keys": True, "input": True,
-              "resize": True, "adopt": True},
+              "resize": True, "adopt": True, "manage": True},
     # Interlock, not a permission. Keep in sync with the allowlist's `kore.protected_sessions`,
     # which overrides this whole list. Empty by default: nothing is protected unless the
     # allowlist names it. The CHECK in _validate() is untouched — it is the mechanism, this
@@ -589,7 +595,50 @@ could serialize. They are printed on their own line; a pane whose own output con
 of these strings would confuse the parser, which is why they are this ugly."""
 
 
-def _term_cmd(name: str, lines: int, screen_only: bool, settle: str = "") -> str:
+def _window_arg(params: dict[str, Any]) -> int | None:
+    """An optional tmux WINDOW index from caller params, validated to a small non-negative
+    int. Kept as its own field (never folded into the session NAME, which forbids ':') so it
+    can be interpolated as ':<n>' after a NAME_RE-checked name and still be shell-safe."""
+    w = params.get("window")
+    if w is None or w == "":
+        return None
+    try:
+        w = int(w)
+    except (TypeError, ValueError):
+        raise KoreOpsError(f"refused: window {w!r} must be an integer") from None
+    if not (0 <= w < 1000):
+        raise KoreOpsError(f"refused: window {w!r} out of range [0, 1000)")
+    return w
+
+
+def _pane_arg(params: dict[str, Any]) -> int | None:
+    """An optional tmux PANE index (within a window), validated like `_window_arg`. Only
+    meaningful together with a window; honored by the caller only when window is set."""
+    p = params.get("pane")
+    if p is None or p == "":
+        return None
+    try:
+        p = int(p)
+    except (TypeError, ValueError):
+        raise KoreOpsError(f"refused: pane {p!r} must be an integer") from None
+    if not (0 <= p < 1000):
+        raise KoreOpsError(f"refused: pane {p!r} out of range [0, 1000)")
+    return p
+
+
+def _tgt(name: str, window: int | None, pane: int | None = None) -> str:
+    """tmux target: '<session>' | '<session>:<window>' | '<session>:<window>.<pane>'. All parts
+    are validated ints, so `%d`-style interpolation keeps the target shell-safe. A pane without
+    a window is ignored (a pane index needs a window to address)."""
+    if window is None:
+        return name
+    t = f"{name}:{int(window)}"
+    if pane is not None:
+        t += f".{int(pane)}"
+    return t
+
+
+def _term_cmd(name: str, lines: int, screen_only: bool, settle: str = "", window: int | None = None, pane: int | None = None) -> str:
     """The shell command for one term capture. `name` goes in UNQUOTED, so it is checked
     here too, not only upstream (2026-10-12: upstream is `norm_name()` in a frozen file
     one import away; a check at the point of interpolation cannot be bypassed by a new
@@ -602,14 +651,17 @@ def _term_cmd(name: str, lines: int, screen_only: bool, settle: str = "") -> str
     stream frame — the same two captures, parsed by the same parser."""
     if not NAME_RE.match(name or ""):
         raise KoreOpsError(f"refused: session name {name!r} must match {NAME_RE.pattern}")
+    tgt = _tgt(name, window, pane)  # '<session>[:<window>[.<pane>]]' (parts pre-validated)
     fmt = ("#{pane_width} #{pane_height} #{history_size} #{cursor_x} #{cursor_y} "
            "#{cursor_flag} #{alternate_on} #{pane_in_mode}")
     hist = "" if screen_only else (
-        f"printf '%s\\n' '{_TERM_H}'; tmux capture-pane -e -p -t {name} -S -{lines} -E -1; ")
+        f"printf '%s\\n' '{_TERM_H}'; tmux capture-pane -e -p -t {tgt} -S -{lines} -E -1; ")
+    # has-session still checks the SESSION (a window index alone can't name a session); the
+    # per-window target only scopes display-message / capture-pane to that window's pane.
     return (f"tmux has-session -t {name} 2>/dev/null && {{ {settle}"
-            f"printf '%s\\n' '{_TERM_G}'; tmux display-message -p -t {name} '{fmt}'; "
+            f"printf '%s\\n' '{_TERM_G}'; tmux display-message -p -t {tgt} '{fmt}'; "
             f"{hist}"
-            f"printf '%s\\n' '{_TERM_S}'; tmux capture-pane -e -p -t {name} -S 0 -E -; }}")
+            f"printf '%s\\n' '{_TERM_S}'; tmux capture-pane -e -p -t {tgt} -S 0 -E -; }}")
 
 
 def _term_section(out: str, marker: str) -> str | None:
@@ -678,7 +730,7 @@ def _term_parse(br: Any, node_ip: str, name: str, out: str, stderr: str,
 
 
 def _term_read(br: Any, node_ip: str, name: str, lines: int,
-               screen_only: bool) -> dict[str, Any]:
+               screen_only: bool, window: int | None = None, pane: int | None = None) -> dict[str, Any]:
     """`capture-pane -e` — the same read as `kore_read`, with the escape codes LEFT IN.
 
     ROUND8's whole premise: `kore_read` runs the capture through bridge's `clean()`, which
@@ -693,7 +745,7 @@ def _term_read(br: Any, node_ip: str, name: str, lines: int,
     br.validate_ip(node_ip)
     full = br.norm_name(name)
     pol = policy()
-    r = br.sh(node_ip, _term_cmd(full, max(1, min(2000, lines)), screen_only),
+    r = br.sh(node_ip, _term_cmd(full, max(1, min(2000, lines)), screen_only, window=window, pane=pane),
               int(pol.get("term_capture_timeout_s", 20)))
     return _term_parse(br, node_ip, full, r.get("stdout") or "", r.get("stderr") or "",
                        screen_only, int(pol.get("term_max_bytes", 262144)))
@@ -1286,7 +1338,9 @@ def _read_dispatch(kind: str, args: dict[str, Any], br: Any) -> Any:
             # pane" did not become a new kind of access just because the client can now
             # render the colours.
             return _term_read(br, str(args["node_ip"]), str(args["name"]),
-                              int(args.get("lines") or 120), bool(args.get("screen")))
+                              int(args.get("lines") or 120), bool(args.get("screen")),
+                              window=(int(args["window"]) if args.get("window") is not None else None),
+                              pane=(int(args["pane"]) if args.get("pane") is not None else None))
         return br.kore_read(str(args["node_ip"]), str(args["name"]),
                           int(args.get("lines") or 120))
     if kind == "status":
@@ -1701,7 +1755,7 @@ def _read_call(kind: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
                              "原因看 state/ccops/read-agent.log"}
 
 
-def _send_bytes_cmd(full: str, raw: bytes) -> str:
+def _send_bytes_cmd(full: str, raw: bytes, window: int | None = None, pane: int | None = None) -> str:
     """Shell command that types the bytes `raw` into session `full`, on any tmux version.
 
     `send-keys -H <hex …>` (tmux >= 3.0) sends exact bytes. Older tmux lacks `-H`, so on
@@ -1713,8 +1767,9 @@ def _send_bytes_cmd(full: str, raw: bytes) -> str:
     """
     hexs = " ".join(f"{b:02x}" for b in raw)
     octs = "".join(f"\\0{b:03o}" for b in raw)
-    return (f"{{ tmux send-keys -t {full} -H {hexs} 2>/dev/null || "
-            f"{{ k=\"$(printf '%b' '{octs}X')\"; tmux send-keys -t {full} -l -- \"${{k%X}}\"; }}; }}")
+    tgt = _tgt(full, window, pane)
+    return (f"{{ tmux send-keys -t {tgt} -H {hexs} 2>/dev/null || "
+            f"{{ k=\"$(printf '%b' '{octs}X')\"; tmux send-keys -t {tgt} -l -- \"${{k%X}}\"; }}; }}")
 
 
 def _input_apply(br: Any, node_ip: str, name: str, p: dict[str, Any]) -> dict[str, Any]:
@@ -1735,6 +1790,8 @@ def _input_apply(br: Any, node_ip: str, name: str, p: dict[str, Any]) -> dict[st
     """
     br.validate_ip(node_ip)
     full = br.norm_name(name)
+    window = _window_arg(p)
+    pane = _pane_arg(p)
     pol = policy()
     settle = float(pol.get("input_settle_s", 0.12))
     hx = str(p.get("hex") or "")
@@ -1768,7 +1825,7 @@ def _input_apply(br: Any, node_ip: str, name: str, p: dict[str, Any]) -> dict[st
     # 表、600/min、per-session lock，上面每一行都照跑。ok 仍然是真的 —— rc≠0 就是没落下去。
     if not bool(p.get("echo", True)):
         with br.session_lock(node_ip, full):
-            r = br.sh(node_ip, _send_bytes_cmd(full, raw),
+            r = br.sh(node_ip, _send_bytes_cmd(full, raw, window, pane),
                       int(pol.get("input_send_timeout_s", 20)))
         rc = int(r.get("rc") or 0)
         err = (r.get("stderr") or "").strip()
@@ -1776,10 +1833,10 @@ def _input_apply(br: Any, node_ip: str, name: str, p: dict[str, Any]) -> dict[st
                 "error": "" if rc == 0 else (err or f"tmux send-keys 退出码 {rc}")[:200],
                 "sent_codepoints": len([c for c in hx.split(" ") if c]),
                 "sent_bytes": len(raw)}
-    settle_cmd = f"{_send_bytes_cmd(full, raw)}; sleep {settle:.3f}; "
+    settle_cmd = f"{_send_bytes_cmd(full, raw, window, pane)}; sleep {settle:.3f}; "
     with br.session_lock(node_ip, full):
         r = br.sh(node_ip,
-                  _term_cmd(full, 0, True, settle=settle_cmd),
+                  _term_cmd(full, 0, True, settle=settle_cmd, window=window, pane=pane),
                   int(pol.get("term_capture_timeout_s", 20)))
     res = _term_parse(br, node_ip, full, r.get("stdout") or "", r.get("stderr") or "",
                       True, int(pol.get("term_max_bytes", 262144)))
@@ -1813,6 +1870,8 @@ def _resize_apply(br: Any, node_ip: str, name: str, p: dict[str, Any]) -> dict[s
     """
     br.validate_ip(node_ip)
     full = br.norm_name(name)
+    window = _window_arg(p)
+    pane = _pane_arg(p)
     pol = policy()
     cols, rows = int(p.get("cols") or 0), int(p.get("rows") or 0)
     auto = bool(p.get("auto"))
@@ -1821,19 +1880,33 @@ def _resize_apply(br: Any, node_ip: str, name: str, p: dict[str, Any]) -> dict[s
     # actually holds the shell, like _input_apply does.
     if not (0 < cols < 10000 and 0 < rows < 10000):
         return {"ok": False, "error": f"refused: resize {cols}x{rows} is not a geometry"}
-    pre = f"tmux resize-window -t {full} -x {cols:d} -y {rows:d} 2>/dev/null; "
+    tgt = _tgt(full, window)
+    pre = f"tmux resize-window -t {tgt} -x {cols:d} -y {rows:d} 2>/dev/null; "
     if auto:
         # Order matters: resize first, then unset. With no terminal attached the unset
         # keeps this geometry; with one attached, the window follows that terminal.
-        pre += f"tmux set-option -t {full} -w -u window-size 2>/dev/null; "
+        pre += f"tmux set-option -t {tgt} -w -u window-size 2>/dev/null; "
     with br.session_lock(node_ip, full):
         r = br.sh(node_ip,
-                  _term_cmd(full, 0, True, settle=pre),
+                  _term_cmd(full, 0, True, settle=pre, window=window, pane=pane),
                   int(pol.get("term_capture_timeout_s", 20)))
     res = _term_parse(br, node_ip, full, r.get("stdout") or "", r.get("stderr") or "",
                       True, int(pol.get("term_max_bytes", 262144)))
     res["asked"] = {"cols": cols, "rows": rows, "auto": auto}
     return res
+
+
+def _manage_apply(br: Any, node_ip: str, name: str, p: dict[str, Any]) -> dict[str, Any]:
+    """Run one validated tmux window/pane management command (rename/new/kill/split). Under the
+    per-session lock, like input/resize, so a management command can't land between a keystroke
+    and its capture."""
+    br.validate_ip(node_ip)
+    full = br.norm_name(name)
+    with br.session_lock(node_ip, full):
+        return br.tmux_manage(node_ip, name, str(p.get("action") or ""),
+                              window=p.get("window"), pane=p.get("pane"),
+                              title=str(p.get("title") or ""), direction=str(p.get("dir") or "h"),
+                              cols=p.get("cols"), rows=p.get("rows"))
 
 
 def _write_agent_child() -> int:
@@ -1872,6 +1945,8 @@ def _write_agent_child() -> int:
                 res = _input_apply(br, ip, name, p)
             elif verb == "resize":
                 res = _resize_apply(br, ip, name, p)
+            elif verb == "manage":
+                res = _manage_apply(br, ip, name, p)
             elif verb == "fs":
                 # The file-browser write ops. `p` is the full fixed-script request the
                 # parent already validated and stamped with prefix + deny_extra; this child
@@ -2036,6 +2111,24 @@ def full_name(name: str) -> str:
     default `kore-`; see TMUX_PREFIX / KORE_BRIDGE_PREFIX)."""
     prefix = getattr(bridge(), "TMUX_PREFIX", "kore-")
     return name if name.startswith(prefix) else prefix + name
+
+
+def list_windows(node_ip: str, name: str) -> dict[str, Any]:
+    """The tmux windows of one session, for the dashboard's window switcher. Read-only
+    (`list-windows` only), name re-checked at the interpolation boundary like the captures."""
+    if not NAME_RE.match(name or ""):
+        raise KoreOpsError(f"refused: session name {name!r} must match {NAME_RE.pattern}")
+    return bridge().list_windows(node_ip, name)
+
+
+def list_panes(node_ip: str, name: str, window: Any) -> dict[str, Any]:
+    """The panes of one tmux window, for the pane switcher. Read-only (`list-panes` only)."""
+    if not NAME_RE.match(name or ""):
+        raise KoreOpsError(f"refused: session name {name!r} must match {NAME_RE.pattern}")
+    w = _window_arg({"window": window})
+    if w is None:
+        raise KoreOpsError("refused: panes needs a window index")
+    return bridge().list_panes(node_ip, name, w)
 
 
 def _self_tmux_descendants() -> dict[int, str]:
@@ -2275,6 +2368,71 @@ def _validate_params(pol: dict[str, Any], verb: str, params: dict[str, Any]) -> 
         if params.get("ansi"):
             clean["ansi"] = True
             clean["screen"] = bool(params.get("screen"))
+    elif verb == "manage":
+        # Window/pane management → an allowlisted tmux command. window/pane/title are validated
+        # here and composed shell-safely in bridge.tmux_manage (ints via %d, name char-whitelisted).
+        action = str(params.get("action") or "")
+        if action not in MANAGE_ACTIONS:
+            raise KoreOpsError(f"refused: action {action!r} not in {MANAGE_ACTIONS}")
+        clean = {"action": action}
+        # pane-scoped actions MUST name a window+pane; window-scoped ones may omit the window
+        # (tmux then targets the session's active window — what the leader-key menu relies on).
+        if action in ("kill-pane", "resize-pane"):
+            w = _window_arg(params)
+            if w is None:
+                raise KoreOpsError(f"refused: action {action!r} needs a window")
+            clean["window"] = w
+        else:
+            w = _window_arg(params)
+            if w is not None:
+                clean["window"] = w
+        if action in ("kill-pane", "resize-pane"):
+            pn = _pane_arg(params)
+            if pn is None:
+                raise KoreOpsError(f"refused: {action} needs a pane")
+            clean["pane"] = pn
+        if action == "resize-pane":
+            # at least one of cols/rows, each a sane cell count
+            got = False
+            for k in ("cols", "rows"):
+                v = params.get(k)
+                if v is None or v == "":
+                    continue
+                try:
+                    iv = int(v)
+                except (TypeError, ValueError):
+                    raise KoreOpsError(f"refused: {k} must be an integer") from None
+                if not (1 <= iv <= 10000):
+                    raise KoreOpsError(f"refused: {k} {iv} out of range")
+                clean[k] = iv
+                got = True
+            if not got:
+                raise KoreOpsError("refused: resize-pane needs cols and/or rows")
+        if action == "split-window":
+            pn = _pane_arg(params)  # optional: split the given pane, else the window's active one
+            if pn is not None:
+                clean["pane"] = pn
+            clean["dir"] = "v" if str(params.get("dir") or "h") == "v" else "h"
+        elif action == "rename-window":
+            title = str(params.get("title") or "")
+            if not WIN_NAME_RE.match(title):
+                raise KoreOpsError(f"refused: window name {title!r} must match {WIN_NAME_RE.pattern}")
+            clean["title"] = title
+        elif action == "new-window":
+            title = str(params.get("title") or "")
+            if title and not WIN_NAME_RE.match(title):
+                raise KoreOpsError(f"refused: window name {title!r} must match {WIN_NAME_RE.pattern}")
+            if title:
+                clean["title"] = title
+    # Optional tmux window index — valid on the pane-scoped verbs. Validated to a small int
+    # and carried as its own field (never merged into the session name).
+    if verb in ("input", "resize", "read"):
+        w = _window_arg(params)
+        if w is not None:
+            clean["window"] = w
+        pn = _pane_arg(params)
+        if pn is not None:
+            clean["pane"] = pn
     return clean
 
 
@@ -2612,7 +2770,7 @@ def read_verb(verb: str, node_ip: str, name: str, *, who: str = "unknown",
     # worth a comment: `read` and `read --ansi` are two different payloads for one pane,
     # so a key without them hands the `<pre>` fallback a screen full of escape codes (or
     # hands xterm.js a stripped one) depending on who asked first inside the TTL.
-    key = (verb, node_ip, name, clean.get("lines"), clean.get("ansi"), clean.get("screen"))
+    key = (verb, node_ip, name, clean.get("lines"), clean.get("ansi"), clean.get("screen"), clean.get("window"), clean.get("pane"))
     ttl = float(pol.get("read_cache_s", 0.5))
     if max_age is not None:
         ttl = min(ttl, max(0.0, float(max_age)))
@@ -2623,7 +2781,9 @@ def read_verb(verb: str, node_ip: str, name: str, *, who: str = "unknown",
     probe = _read_call(verb, {"node_ip": node_ip, "name": name,
                               "lines": clean.get("lines"),
                               "ansi": clean.get("ansi"),
-                              "screen": clean.get("screen")})
+                              "screen": clean.get("screen"),
+                              "window": clean.get("window"),
+                              "pane": clean.get("pane")})
     if probe.get("ok"):
         res = dict(probe.get("data") or {})
         res["probe"] = probe.get("probe") or {}
@@ -2892,7 +3052,7 @@ def _audit_input(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def input_keys(node_ip: str, name: str, *, hex_keys: str,
-               echo: bool = True, who: str = "unknown") -> dict[str, Any]:
+               echo: bool = True, window: int | None = None, pane: int | None = None, who: str = "unknown") -> dict[str, Any]:
     """One batch of keystrokes, typed now, with the resulting screen as the receipt.
 
     Synchronous on purpose (see the section comment): the caller is a terminal waiting to
@@ -2917,7 +3077,7 @@ def input_keys(node_ip: str, name: str, *, hex_keys: str,
         raise KoreOpsError(reason)
 
     try:
-        clean = _validate(pol, "input", node_ip, name, {"hex": hex_keys, "echo": echo})
+        clean = _validate(pol, "input", node_ip, name, {"hex": hex_keys, "echo": echo, "window": window, "pane": pane})
     except KoreOpsError as exc:
         refuse(str(exc))
         raise  # unreachable; keeps type checkers honest
@@ -2941,7 +3101,7 @@ def input_keys(node_ip: str, name: str, *, hex_keys: str,
 
 
 def resize_window(node_ip: str, name: str, *, cols: int, rows: int, auto: bool = False,
-                  who: str = "unknown") -> dict[str, Any]:
+                  window: int | None = None, pane: int | None = None, who: str = "unknown") -> dict[str, Any]:
     """Make the far window `cols`×`rows` now, with the resulting screen as the receipt.
 
     Same door shape as `input_keys()`: synchronous, no job row, its own minute budget, its
@@ -2968,7 +3128,7 @@ def resize_window(node_ip: str, name: str, *, cols: int, rows: int, auto: bool =
 
     try:
         clean = _validate(pol, "resize", node_ip, name,
-                          {"cols": cols, "rows": rows, "auto": auto})
+                          {"cols": cols, "rows": rows, "auto": auto, "window": window, "pane": pane})
     except KoreOpsError as exc:
         refuse(str(exc))
         raise  # unreachable; keeps type checkers honest
@@ -2983,6 +3143,42 @@ def resize_window(node_ip: str, name: str, *, cols: int, rows: int, auto: bool =
     # Stamped in this process, like input's receipt, because the browser decides which of
     # its two screens is newer by comparing these numbers. See input_keys().
     return {**res, "fetched_at": time.time(), "verb": "resize",
+            "node_ip": node_ip, "name": full_name(name)}
+
+
+def manage_window(node_ip: str, name: str, *, action: str, window: int | None = None,
+                  pane: int | None = None, title: str = "", direction: str = "h",
+                  cols: int | None = None, rows: int | None = None,
+                  who: str = "unknown") -> dict[str, Any]:
+    """One tmux window/pane management command (approach A: dashboard action -> tmux command).
+    Same door shape as input_keys/resize_window: synchronous, its own ledger rows, every refusal
+    written before the write agent is touched. The action set is allowlisted (MANAGE_ACTIONS)."""
+    pol = policy()
+    at = time.time()
+    base = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(at)),
+            "at_epoch": at, "verb": "manage", "who": who, "node_ip": node_ip,
+            "name": full_name(name) if NAME_RE.match(name or "") else str(name)[:64],
+            "action": str(action)[:32], "window": window, "pane": pane,
+            "title": str(title)[:48]}
+
+    def refuse(reason: str) -> None:
+        _audit_input({**base, "action_result": "refused", "ok": False, "reason": reason})
+        raise KoreOpsError(reason)
+
+    try:
+        clean = _validate(pol, "manage", node_ip, name,
+                          {"action": action, "window": window, "pane": pane,
+                           "title": title, "dir": direction, "cols": cols, "rows": rows})
+    except KoreOpsError as exc:
+        refuse(str(exc))
+        raise  # unreachable; keeps type checkers honest
+    ok, recent = _resize_rate_ok(int(pol.get("max_resize_per_minute", 60)))
+    if not ok:
+        refuse(f"refused: manage rate limit — {recent} ops in the last 60s")
+    res = _agent_call("manage", node_ip, name, clean)
+    _audit_input({**base, "action_result": "accepted", "ok": bool(res.get("ok")),
+                  "error": str(res.get("error") or "")[:200]})
+    return {**res, "fetched_at": time.time(), "verb": "manage",
             "node_ip": node_ip, "name": full_name(name)}
 
 
@@ -3026,7 +3222,7 @@ def _tap_sigterm(signum, frame):  # noqa: ARG001 - signal handler signature
     raise KeyboardInterrupt
 
 
-def tap_stream(node_ip: str, name: str, *, who: str = "unknown") -> int:
+def tap_stream(node_ip: str, name: str, *, window: int | None = None, pane: int | None = None, who: str = "unknown") -> int:
     """`koreops.py tap <node_ip> <name>`: own one byte tap, print its bytes, forever.
 
     Runs in a child so a wedged node can never park the board. It is a READ door —
@@ -3062,11 +3258,11 @@ def tap_stream(node_ip: str, name: str, *, who: str = "unknown") -> int:
     # never learn which backend produced the bytes.
     br = bridge()
     if node_ip == br._local_node_ip():
-        return _tap_local(br, node_ip, sess, pol)
-    return _tap_http(br, node_ip, sess, pol)
+        return _tap_local(br, node_ip, sess, pol, window, pane)
+    return _tap_http(br, node_ip, sess, pol, window, pane)
 
 
-def _tap_http(br: Any, node_ip: str, sess: str, pol: dict[str, Any]) -> int:
+def _tap_http(br: Any, node_ip: str, sess: str, pol: dict[str, Any], window: int | None = None, pane: int | None = None) -> int:
     """HTTP backend: the node's kore-agent holds the `tmux -C` and streams the r/o/g/h/e
     protocol as chunked text; this just forwards each line to `_tap_say` verbatim (the
     agent emits the identical vocabulary). Teardown is the three-layer story from the
@@ -3083,6 +3279,10 @@ def _tap_http(br: Any, node_ip: str, sess: str, pol: dict[str, Any]) -> int:
     query = {"session": sess,
              "hist": int(pol.get("tap_hist_lines", 400)),
              "max_bytes": int(pol.get("tap_chunk_max_bytes", 262144))}
+    if window is not None:
+        query["window"] = int(window)
+    if pane is not None:
+        query["pane"] = int(pane)
     read_timeout = max(6.0, float(pol.get("tap_pull_wait_s", 2.0)) * 3)
     try:
         resp = br._agent_stream(url, "/tap", query, timeout=read_timeout)
@@ -3120,15 +3320,15 @@ def _tap_http(br: Any, node_ip: str, sess: str, pol: dict[str, Any]) -> int:
             pass
 
 
-def _tap_local(br: Any, node_ip: str, sess: str, pol: dict[str, Any]) -> int:
+def _tap_local(br: Any, node_ip: str, sess: str, pol: dict[str, Any], window: int | None = None, pane: int | None = None) -> int:
     """Self-node backend: run PaneTap in THIS process (kore-agent's authoritative copy),
     re-emitting via `_tap_say` exactly as the HTTP relay does. No agent, no round trip."""
     PaneTap = agent_mod().PaneTap
     wait = float(pol.get("tap_pull_wait_s", 2.0))
-    pane = PaneTap(sess, int(pol.get("tap_hist_lines", 400)),
-                   int(pol.get("tap_chunk_max_bytes", 262144)))
+    tap = PaneTap(sess, int(pol.get("tap_hist_lines", 400)),
+                  int(pol.get("tap_chunk_max_bytes", 262144)), window=window, pane=pane)
     try:
-        res = pane.start()
+        res = tap.start()
         if not res.get("ok"):
             _tap_say("e", str(res.get("error") or "attach 失败，没说为什么"))
             return 2
@@ -3138,7 +3338,7 @@ def _tap_local(br: Any, node_ip: str, sess: str, pol: dict[str, Any]) -> int:
                 "o", base64.b64encode(res["paint"]).decode("ascii")):
             return 0
         while True:
-            got = pane.pull(wait)
+            got = tap.pull(wait)
             if got.get("geom") and not _tap_say("g", got["geom"]):
                 return 0
             data = got.get("bytes") or b""
@@ -3161,12 +3361,12 @@ def _tap_local(br: Any, node_ip: str, sess: str, pol: dict[str, Any]) -> int:
         return 2
     finally:
         try:
-            pane.close()  # kills the local `tmux -C attach -r`
+            tap.close()  # kills the local `tmux -C attach -r`
         except Exception:  # noqa: BLE001
             pass
 
 
-def tap_spawn(node_ip: str, name: str, *, who: str = "unknown") -> subprocess.Popen:
+def tap_spawn(node_ip: str, name: str, *, window: int | None = None, pane: int | None = None, who: str = "unknown") -> subprocess.Popen:
     """Start a `tap` child for somebody else to read, and hand back the process.
 
     Here rather than in the caller so the board does not grow its own idea of how to
@@ -3184,6 +3384,10 @@ def tap_spawn(node_ip: str, name: str, *, who: str = "unknown") -> subprocess.Po
     """
     cmd = [_probe_python(), os.path.abspath(__file__), "tap", node_ip, name,
            "--who", who or "unknown"]
+    if window is not None:
+        cmd += ["--window", str(int(window))]
+    if pane is not None:
+        cmd += ["--pane", str(int(pane))]
     return subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             env=_child_env())
 
@@ -3284,6 +3488,10 @@ def main(argv: list[str] | None = None) -> int:
     ptp = target(sub.add_parser("tap", help="stream the pane's bytes (control mode, read-only)"))
     ptp.add_argument("--who", default="",
                      help="who is watching, for the ledger row (the board passes its user)")
+    ptp.add_argument("--window", type=int, default=None,
+                     help="tmux window index to stream (default: the session's active window)")
+    ptp.add_argument("--pane", type=int, default=None,
+                     help="tmux pane index within --window (default: that window's active pane)")
 
     pj = sub.add_parser("jobs", help="recent write jobs (this process only)")
     pj.add_argument("--limit", type=int, default=30)
@@ -3330,7 +3538,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "tap":
             # No _dump(): stdout is the line protocol, and a JSON blob on it would be a
             # frame the reader cannot parse.
-            return tap_stream(args.node_ip, args.name, who=args.who or _cli_who())
+            return tap_stream(args.node_ip, args.name, window=args.window, pane=args.pane, who=args.who or _cli_who())
         if args.cmd == "input":
             # Not run_sync(): submit() refuses this verb on purpose (one door per verb).
             res = input_keys(args.node_ip, args.name, hex_keys=args.hex,

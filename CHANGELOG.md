@@ -6,6 +6,30 @@ All notable changes to **kore** are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.6] — 2026-10-26
+
+### Added
+- **Native tmux windows & panes.** A session is no longer pinned to its active pane. The status
+  bar lists the session's tmux windows as clickable tabs; selecting a window with multiple panes
+  mirrors the *whole* window — every pane laid out by tmux's own geometry — instead of a single
+  pane. Split dividers are draggable (→ `tmux resize-pane`) with a live preview line. Overview
+  cards surface each session's live command, cwd, and a "N 窗口 · N 分屏" badge.
+- **tmux-style status bar** along the bottom of each terminal: session name, window tabs, clock.
+- **Keyboard-driven tmux management (leader menu).** Press `⌃⇧A` over a focused terminal for a
+  tmux-prefix-style menu — `c` new window, `s`/`v` split, `r` rename, `&` kill, `0–9` jump to a
+  window. The same actions, with their shortcuts, are listed in the `⌘K` palette and the window
+  title's switcher. All management runs through the audited write door as a new `manage` verb
+  (window/pane are independently validated integer fields, never folded into the session name).
+
+### Changed
+- **One downleveled front-end for every browser.** The CSS that old in-app WebViews (如流 =
+  Chrome 97) can't parse — `@layer`, `oklch()`, `color-mix()`, nesting — is now flattened at
+  build time into the single shipped `index.html`. A modern browser renders it identically
+  (verified side by side), so the previous modern/legacy split and the server-side UA sniffing
+  are gone.
+- **The mobile key row sits below the tmux status bar**, pinned to the soft keyboard, instead of
+  under it.
+
 ## [0.5.5] — 2026-10-26
 
 ### Changed
