@@ -677,7 +677,7 @@ export function FilesView({
                     <Download className="size-4" />
                   </button>
                 </div>
-                <div className="relative mx-2 mb-2 min-h-0 flex-1 overflow-hidden rounded-md bg-[#0d1117]">
+                <div className="relative mx-2 mb-2 min-h-0 flex-1 overflow-hidden rounded-md bg-[var(--term-bg)]">
                   {previewing && (
                     <div className="text-muted-foreground absolute inset-0 flex items-center justify-center text-xs">
                       <Loader2 className="mr-1.5 size-4 animate-spin" /> 读取中…
@@ -833,7 +833,7 @@ function Row({ node, style }: NodeRendererProps<FNode>) {
           <span className="text-muted-foreground flex size-4 shrink-0 items-center justify-center">
             {dir && (node.isOpen ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />)}
           </span>
-          <Icon className={cn('size-4 shrink-0', dir ? 'text-[var(--done)]' : 'text-muted-foreground')} />
+          <Icon className={cn('size-4 shrink-0', dir ? 'text-info' : 'text-muted-foreground')} />
           <span className={cn('min-w-0 flex-1 truncate', dir && 'font-medium')}>
             {d.name}
             {fresh && (

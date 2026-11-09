@@ -76,6 +76,7 @@ import socketserver
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -186,8 +187,10 @@ KORE_AGENT_TOKEN = os.environ.get("KORE_AGENT_TOKEN", "")
 INSTALL_URL = os.environ.get(
     "KORE_INSTALL_URL",
     f"https://raw.githubusercontent.com/{os.environ.get('KORE_REPO', 'Tiiiktak/kore')}/main/install.sh")
-KORE_AGENTS_FILE = os.path.expanduser(
-    os.environ.get("KORE_AGENTS_FILE", "~/.kore/agents.json"))
+# Host-local by default — see kore-bridge.py's KORE_AGENTS_FILE (keep the two in sync).
+KORE_AGENTS_FILE = os.path.expanduser(os.environ.get("KORE_AGENTS_FILE") or os.path.join(
+    os.environ.get("KORE_RUNTIME_DIR") or os.path.join(tempfile.gettempdir(), f"kore-{os.getuid()}"),
+    "agents.json"))
 _IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 _WS_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")   # tmux session name on a ws subscription
 
@@ -198,15 +201,29 @@ _WS_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")   # tmux session name on a ws
 _STATE_HOME = os.path.expanduser(os.environ.get("KORE_STATE_HOME") or "~/.kore")
 LABELS_FILE = os.path.join(_STATE_HOME, "labels.json")
 # Platform config the user edits from the dashboard (not the write POLICY in
-# dispatch-allowlist.json). Currently just the upgrade proxy — github.com is usually blocked
-# on an intranet node, so the user points the latest-check + `kore upgrade` at a proxy here.
+# dispatch-allowlist.json). The upgrade proxy — github.com is usually blocked on an intranet
+# node, so the user points the latest-check + `kore upgrade` at a proxy here — and
+# `sysinfo_gpu` ("1" = also run nvidia-smi in the overview metrics; default off).
 # Local + 0600: it may carry proxy credentials, so it is never committed and never logged.
 CONFIG_FILE = os.path.join(_STATE_HOME, "config.json")
-_CONFIG_KEYS = ("upgrade_proxy", "no_proxy")
+_CONFIG_KEYS = ("upgrade_proxy", "no_proxy", "sysinfo_gpu")
 _config_mu = threading.Lock()
 
 
+# In-memory copy, same reasoning as labels: this board is the only writer, and the config is
+# read on the sysinfo poll — so never re-open the (NFS) file per request.
+_config_cache: dict | None = None
+
+
 def _config_load() -> dict:
+    """The platform config, as a fresh copy."""
+    global _config_cache
+    if _config_cache is None:
+        _config_cache = _config_read()
+    return dict(_config_cache)
+
+
+def _config_read() -> dict:
     try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             d = json.load(f)
@@ -217,6 +234,7 @@ def _config_load() -> dict:
 
 
 def _config_set(updates: dict) -> dict:
+    global _config_cache
     with _config_mu:
         cfg = _config_load()
         for k in _CONFIG_KEYS:
@@ -228,6 +246,10 @@ def _config_set(updates: dict) -> dict:
             json.dump(cfg, f)
         os.chmod(tmp, 0o600)        # may hold proxy credentials
         os.replace(tmp, CONFIG_FILE)
+        _config_cache = dict(cfg)
+    if "sysinfo_gpu" in updates:
+        with _sysinfo_lock:
+            _sysinfo_cache["data"] = None   # next poll reflects the toggle at once
     return cfg
 
 
@@ -260,9 +282,21 @@ _LABEL_KEY_RE = {
 }
 _LABEL_ICON_RE = re.compile(r"^[a-z]{1,16}$")
 _labels_mu = threading.Lock()
+# In-memory copy. This board is the only writer, so after the first read memory IS the
+# truth — and every roster poll returns labels, so reading the file each time put an NFS
+# open() (which can stall for minutes on a shared home) on the dashboard's hottest path.
+_labels_cache: dict | None = None
 
 
 def _labels_load() -> dict:
+    """All labels, as a fresh copy (callers may mutate it)."""
+    global _labels_cache
+    if _labels_cache is None:
+        _labels_cache = _labels_read()
+    return json.loads(json.dumps(_labels_cache))
+
+
+def _labels_read() -> dict:
     try:
         with open(LABELS_FILE, encoding="utf-8") as f:
             d = json.load(f)
@@ -283,6 +317,7 @@ def _labels_set(kind: str, key: str, name: str, icon: str) -> dict:
         raise ValueError("name: at most 40 characters, no control characters")
     if icon and not _LABEL_ICON_RE.match(icon):
         raise ValueError("icon: a short lowercase id")
+    global _labels_cache
     with _labels_mu:
         labels = _labels_load()
         table = labels["nodes" if kind == "node" else "sessions"]
@@ -295,7 +330,8 @@ def _labels_set(kind: str, key: str, name: str, icon: str) -> dict:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(labels, f, ensure_ascii=False, indent=1)
         os.replace(tmp, LABELS_FILE)
-    return labels
+        _labels_cache = labels
+    return json.loads(json.dumps(labels))
 
 
 # Server -> client reachability, probed when a client registers. Registration only proves
@@ -348,7 +384,7 @@ def _agents_register(node_ip: str, agent_url: str, sessions: list,
     (done by the readers against their own `now`) only works if the stamp shares that
     clock. Stale entries are never deleted here; readers prune by TTL, which is flap-safe.
     """
-    os.makedirs(os.path.dirname(KORE_AGENTS_FILE) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(KORE_AGENTS_FILE) or ".", mode=0o700, exist_ok=True)
     rec = {"agent_url": agent_url, "last_seen": time.time(),
            "sessions": [s for s in sessions if isinstance(s, str)], **(extra or {})}
     with open(KORE_AGENTS_FILE + ".lock", "w") as lf:
@@ -584,6 +620,8 @@ def _load(name: str, path: str):
 
 
 _TOKEN_IN_URL = re.compile(r"([?&]token=)[^&\s]+")
+# Share links carry their token in the PATH (/s/<tok>, /api/share/<tok>/...): same rule.
+_SHARE_IN_URL = re.compile(r"(/s/|/api/share/)[A-Za-z0-9_-]+")
 
 
 def _redact(s: str) -> str:
@@ -596,7 +634,7 @@ def _redact(s: str) -> str:
     又是没人在盯的。板子绑 0.0.0.0，这个口令是网络到 POST /api/kore/stop 之间唯一一道门。
     （2026-10-12 review 的 #5。脱敏只管住往后写的那些；已经落盘的那两份日志要靠轮换口令，
     那是 owner 的决定，不在这里做。）"""
-    return _TOKEN_IN_URL.sub(r"\1<redacted>", s)
+    return _SHARE_IN_URL.sub(r"\1<redacted>", _TOKEN_IN_URL.sub(r"\1<redacted>", s))
 
 
 def _qint(raw, default: int, lo: int, hi: int) -> int:
@@ -614,6 +652,11 @@ def _qint(raw, default: int, lo: int, hi: int) -> int:
 
 
 state_mod = _load("wb_state", os.path.join(HERE, "state.py"))
+shares_mod = _load("wb_shares", os.path.join(HERE, "shares.py"))
+SHARES = shares_mod.ShareStore(os.path.join(_STATE_HOME, "shares.json"))
+# job id -> the message a share sent, so /job can cut the reply out of the screen (koreops
+# deliberately keeps message text out of job records). Bounded; oldest dropped first.
+_SHARE_MSGS: dict[str, str] = {}
 koreops = _load("wb_koreops", KORE_OPS_PATH)
 # One bridge instance for the whole process: its per-session locks live in module
 # globals, and two copies would let two concurrent sends interleave keystrokes.
@@ -683,10 +726,11 @@ def _sysinfo(force: bool = False) -> dict:
             return c["data"]
     eng = state_mod.bridge()
     ips = list(eng.alive_ips())
+    gpu = _config_load().get("sysinfo_gpu") == "1"
     nodes: dict = {}
     if ips:
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(ips))) as ex:
-            futs = {ip: ex.submit(eng.node_system_metrics, ip) for ip in ips}
+            futs = {ip: ex.submit(eng.node_system_metrics, ip, gpu) for ip in ips}
             for ip, fut in futs.items():
                 try:
                     nodes[ip] = fut.result(timeout=16)
@@ -1045,11 +1089,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # 升级 affordance. TTL-cached so the button can't hammer GitHub; ?force=1 re-checks.
             # Never 500s — an unreachable feed returns {ok:false, error}.
             self._json(200, _latest_release(force=one("force") == "1"))
+        elif path == "/api/kore/shares":
+            # This session's live share links (owner view; never includes tokens).
+            self._json(200, {"ok": True, "shares": SHARES.list(one("node_ip"), koreops.full_name(one("name")))})
         elif path == "/api/kore/config":
-            # Platform settings the user edits in the dashboard (the upgrade proxy today).
+            # Platform settings the user edits in the dashboard (upgrade proxy, sysinfo_gpu).
             self._json(200, {"ok": True, "config": _config_load()})
         elif path == "/api/kore/sysinfo":
-            # Per-node load / cpu / mem / disk / gpu for the overview. Short-TTL cached;
+            # Per-node load / cpu / mem / disk (+ gpu if `sysinfo_gpu`) for the overview. Short-TTL cached;
             # ?force=1 recollects. Never 500s — an unreachable node is just {}.
             self._json(200, _sysinfo(force=one("force") == "1"))
         elif path == "/api/join":
@@ -1870,6 +1917,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # it BEFORE the query-token gate below.
                 self._wview(path, parts.query)
                 return
+            if path.startswith("/s/"):
+                # A share link's page: the same one-file app, which renders the share view
+                # for /s/<token>. The page itself grants nothing — every call it makes is
+                # checked against the token by the /api/share/ door below.
+                self._send_static(os.path.join(HERE, "index.html"),
+                                  "text/html; charset=utf-8", "no-cache")
+                return
+            if path.startswith("/api/share/"):
+                self._share_get(path, parts.query)
+                return
             if not self._authorized(parts.query):
                 self._send(401, b'{"error":"unauthorized"}', "application/json")
                 return
@@ -1926,6 +1983,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/agents/register":
                 self._agents_register_endpoint(raw)
                 return
+            # Share links: a third trust domain — the share token in the path, scoped to one
+            # session (see shares.py). Dispatched before the WB gate, like the agent door.
+            if path.startswith("/api/share/"):
+                self._share_post(path, raw)
+                return
             # Deliberately NOT self._authorized(): a write token must never be
             # accepted from the query string. See the module docstring.
             if not self._bearer_ok():
@@ -1939,8 +2001,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # token but not koreops' gate or a `confirm`.
                 self._labels_endpoint(raw)
                 return
+            if path in ("/api/kore/shares", "/api/kore/shares/revoke"):
+                # Owner side of share links (create / revoke). Bearer-only like every write;
+                # local to this board, nothing reaches a node.
+                self._shares_owner_post(path, raw)
+                return
             if path == "/api/kore/config":
-                # Platform settings (upgrade proxy). Local to this board — nothing reaches a
+                # Platform settings (upgrade proxy, sysinfo_gpu). Local to this board — nothing reaches a
                 # node on save — so like /api/labels it needs the Bearer but no confirm.
                 self._config_endpoint(raw)
                 return
@@ -2058,6 +2125,157 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(403, {"ok": False, "refused": str(exc)})
         except Exception:  # noqa: BLE001
             self._fault()
+
+    # -- share links (see shares.py) -------------------------------------------------------
+
+    def _shares_owner_post(self, path: str, raw: bytes) -> None:
+        """POST /api/kore/shares {node_ip, name, scope, ttl_s, label} -> the new share, with
+        its token (shown this once). POST /api/kore/shares/revoke {id}. Bearer checked."""
+        try:
+            body = json.loads(raw.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._json(400, {"ok": False, "error": f"bad JSON body: {exc}"})
+            return
+        if not isinstance(body, dict):
+            self._json(400, {"ok": False, "error": "body must be a JSON object"})
+            return
+        if path.endswith("/revoke"):
+            ok = SHARES.revoke(str(body.get("id") or ""))
+            self._json(200 if ok else 404, {"ok": ok})
+            return
+        node_ip, name = str(body.get("node_ip") or ""), str(body.get("name") or "")
+        try:
+            # The session must be one this board may READ — the same gate a share's own
+            # reads will hit, checked now so a dead/unknown target never gets a link.
+            r = koreops.read_verb("status", node_ip, name, who=self._who())
+            if not r.get("ok") or not r.get("tmux"):   # status answers ok for a missing one
+                self._json(404, {"ok": False, "error": r.get("error") or "no such session"})
+                return
+            share = SHARES.create(node_ip, koreops.full_name(name), str(body.get("scope") or ""),
+                                  int(body.get("ttl_s") or 86400), str(body.get("label") or ""))
+        except (ValueError, TypeError) as exc:
+            self._json(400, {"ok": False, "error": str(exc)})
+            return
+        except koreops.KoreOpsError as exc:
+            self._json(403, {"ok": False, "refused": str(exc)})
+            return
+        self._json(200, {"ok": True, "share": share})
+
+    def _share_auth(self, path: str):
+        """(record, rest-of-path) for /api/share/<token>[/<rest>], or (None, "") after a 404.
+        One answer for unknown, expired and revoked: a probe learns nothing."""
+        tail = path[len("/api/share/"):]
+        token, _, rest = tail.partition("/")
+        rec = SHARES.lookup(token)
+        if rec is None:
+            self._json(404, {"ok": False, "error": "share link is invalid or has expired"})
+            return None, ""
+        return rec, rest
+
+    def _share_who(self, rec) -> str:
+        return f"share:{rec['id']}:{self.client_address[0]}"
+
+    def _share_get(self, path: str, query: str) -> None:
+        rec, rest = self._share_auth(path)
+        if rec is None:
+            return
+        try:
+            if rest == "":
+                # What this link is: enough for the page header and for an agent to learn
+                # its own capabilities. Never the board token, never other sessions.
+                labels = _labels_load()
+                eng = state_mod.bridge()
+                prefix = getattr(eng, "TMUX_PREFIX", "kore-")
+                key = f"{rec['node_ip']}/{rec['name']}"
+                display = (labels["sessions"].get(key) or {}).get("name") or (
+                    rec["name"][len(prefix):] if rec["name"].startswith(prefix) else rec["name"])
+                node = (labels["nodes"].get(rec["node_ip"]) or {}).get("name") or rec["node_ip"]
+                self._json(200, {"ok": True, **SHARES.public(rec), "session": display,
+                                 "node": node, "can_chat": rec["scope"] == "chat"})
+            elif rest == "read":
+                r = koreops.read_verb("read", rec["node_ip"], rec["name"], who=self._share_who(rec),
+                                      lines=200, ansi=parse_qs(query).get("ansi", ["1"])[0] != "0",
+                                      screen=True)
+                self._json(200, {k: r.get(k) for k in ("ok", "output", "cols", "rows", "state",
+                                                       "cursor_x", "cursor_y", "error")})
+            elif rest == "job":
+                j = koreops.job(parse_qs(query).get("id", [""])[0])
+                if not j or j.get("who", "").split(":")[:2] != ["share", rec["id"]]:
+                    self._json(404, {"ok": False, "error": "no such job for this share"})
+                    return
+                self._json(200, self._share_job_view({**j, "_message": _SHARE_MSGS.get(j["id"], "")}))
+            else:
+                self._json(404, {"ok": False, "error": "unknown share endpoint"})
+        except koreops.KoreOpsError as exc:
+            self._json(403, {"ok": False, "refused": str(exc)})
+
+    def _share_job_view(self, j: dict) -> dict:
+        res = j.get("result") or {}
+        screen = str(res.get("output") or "")
+        done = j.get("state") in ("done", "failed")
+        out = {"ok": j.get("ok") is not False, "job_id": j.get("id"), "done": done,
+               "job_state": j.get("state"), "error": j.get("error") or ""}
+        if done:
+            # agent state after the turn: idle (answered), waiting (stopped on a prompt
+            # only the owner can answer), timeout (still working; poll /read)
+            out.update(agent_state=res.get("state"), screen=screen,
+                       reply=shares_mod.reply_after(screen, str(j.get("_message") or "")))
+        return out
+
+    def _share_post(self, path: str, raw: bytes) -> None:
+        """POST /api/share/<token>/send {message, wait=true, timeout=600}: one line to the
+        agent. wait=true blocks until the turn settles and returns {reply, screen,
+        agent_state}; wait=false returns {job_id} at once (poll .../job?id=)."""
+        rec, rest = self._share_auth(path)
+        if rec is None:
+            return
+        if rest != "send":
+            self._json(404, {"ok": False, "error": "unknown share endpoint"})
+            return
+        if rec["scope"] != "chat":
+            self._json(403, {"ok": False, "refused": "this share link is read-only"})
+            return
+        try:
+            body = json.loads(raw.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._json(400, {"ok": False, "error": f"bad JSON body: {exc}"})
+            return
+        msg = body.get("message") if isinstance(body, dict) else None
+        if not isinstance(msg, str) or not msg.strip():
+            self._json(400, {"ok": False, "error": "message must be a non-empty string"})
+            return
+        if not SHARES.chat_allowed(rec["id"]):
+            self._json(429, {"ok": False, "refused":
+                             f"rate limit: {shares_mod.CHAT_PER_MINUTE} messages a minute per link"})
+            return
+        wait = body.get("wait", True) is not False
+        timeout = max(10, min(int(body.get("timeout") or 600), 1800))
+        try:
+            # The SAME write door as the board's own send: koreops validates (one line, size
+            # cap, protected sessions, deny_nodes), rate-limits and audits it, with `who`
+            # naming this share — so the ledger says which link said what.
+            j = koreops.submit("send", rec["node_ip"], rec["name"], who=self._share_who(rec),
+                               message=msg, wait=True, timeout=timeout)
+        except koreops.KoreOpsError as exc:
+            self._json(403, {"ok": False, "refused": str(exc)})
+            return
+        jid = j.get("id")
+        if jid:
+            _SHARE_MSGS[jid] = msg
+            while len(_SHARE_MSGS) > 500:
+                del _SHARE_MSGS[next(iter(_SHARE_MSGS))]
+        if not wait or not jid:
+            self._json(202, {"ok": True, "job_id": jid})
+            return
+        deadline = time.time() + timeout + 30
+        while time.time() < deadline:
+            cur = koreops.job(jid)
+            if cur and cur.get("state") in ("done", "failed"):
+                self._json(200, self._share_job_view({**cur, "_message": msg}))
+                return
+            time.sleep(1.0)
+        self._json(200, {"ok": True, "job_id": jid, "done": False,
+                         "note": "still running; poll /api/share/<token>/job?id=<job_id>"})
 
     def _labels_endpoint(self, raw: bytes) -> None:
         """POST {kind: "node"|"session", key, name, icon}. Empty name AND icon = reset."""
@@ -2272,6 +2490,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    # listen() backlog. The stdlib default is 5: a page load from a few browsers plus client
+    # heartbeats overflows it, and the kernel then silently drops SYNs — the peer retries
+    # after 1s/3s/7s, which reads as random multi-second stalls or "Connection timed out".
+    request_queue_size = 128
 
 
 if __name__ == "__main__":

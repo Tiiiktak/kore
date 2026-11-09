@@ -47,7 +47,7 @@ function save() {
       JSON.stringify({
         cur: state.cur,
         view: state.view,
-        workspaces: state.workspaces.map((w) => ({ id: w.id, name: w.name, focused: w.focused, root: w.root })),
+        workspaces: state.workspaces.map((w) => ({ id: w.id, name: w.name, focused: w.focused, root: w.root, group: w.group })),
         wins: state.wins,
       }),
     )
@@ -85,7 +85,14 @@ function restore(): boolean {
     const root = cleanTree(w.root, wmap, seen)
     if (!root) continue
     for (const id of seen) wins[id] = { id, type: wmap[id].type, state: wmap[id].state || {} }
-    out.push({ id: w.id || uid('ws'), name: w.name || '工作区', focused: seen.has(w.focused) ? w.focused : null, zoom: null, root })
+    out.push({
+      id: w.id || uid('ws'),
+      name: w.name || '工作区',
+      focused: seen.has(w.focused) ? w.focused : null,
+      zoom: null,
+      root,
+      group: typeof w.group === 'string' ? w.group : undefined,
+    })
   }
   if (!out.length) return false
   state.wins = wins
@@ -227,20 +234,37 @@ export const wmStore = {
     this.switchWs(state.workspaces.length - 1)
   },
 
-  closeWs(id: string) {
+  // Returns an undo that puts the workspace (and its windows) back where it was — closing is
+  // reversible (sessions keep running), so the caller offers 撤销 instead of a confirm.
+  closeWs(id: string): () => void {
     const idx = state.workspaces.findIndex((w) => w.id === id)
-    if (idx < 0) return
-    for (const wid of listWins(state.workspaces[idx].root)) delete state.wins[wid]
+    if (idx < 0) return () => {}
+    const ws = state.workspaces[idx]
+    const saved: Record<string, Win> = {}
+    for (const wid of listWins(ws.root)) {
+      saved[wid] = state.wins[wid]
+      delete state.wins[wid]
+    }
+    const undo = () => {
+      if (state.workspaces.some((w) => w.id === ws.id)) return
+      Object.assign(state.wins, saved)
+      const at = Math.min(idx, state.workspaces.length)
+      state.workspaces.splice(at, 0, ws)
+      state.cur = at
+      state.view = 'stage'
+      emit()
+    }
     state.workspaces.splice(idx, 1)
     if (!state.workspaces.length) {
       state.cur = 0
       state.view = 'home'
       emit()
-      return
+      return undo
     }
     if (idx < state.cur) state.cur -= 1
     state.cur = Math.min(state.cur, state.workspaces.length - 1)
     emit()
+    return undo
   },
 
   focus(winId: string) {
@@ -323,6 +347,24 @@ export const wmStore = {
       node.r = r
       emit()
     }
+  },
+
+  // Assign a workspace to a custom tab group (null = ungrouped). See lib/tabgroups.
+  setWsGroup(wsId: string, group: string | null) {
+    const ws = state.workspaces.find((w) => w.id === wsId)
+    if (!ws) return
+    ws.group = group ?? undefined
+    emit()
+  },
+
+  // The machine a workspace belongs to for 'machine' grouping: the node_ip of its first terminal
+  // window (document order). null = no terminal (web/files-only workspace → catch-all section).
+  wsMachine(ws: Workspace): string | null {
+    for (const id of listWins(ws.root)) {
+      const w = state.wins[id]
+      if (w && w.type === 'term' && w.state.node_ip) return w.state.node_ip as string
+    }
+    return null
   },
 
   // list of workspace terminal windows for tab labels

@@ -1,7 +1,8 @@
-import { type ReactNode, useState } from 'react'
-import { ChevronRight, Columns2, Pencil, Plus, SquareStack, X } from 'lucide-react'
+import { type ComponentProps, useState } from 'react'
+import { ChevronRight, Pencil, Plus, SquareSplitHorizontal, SquareStack, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { ConfirmPopover } from '@/components/ConfirmPopover'
 import { apiGet, kPost } from '@/lib/api'
 import { useRosterCtx } from '@/lib/roster-context'
 import { wmStore } from '@/lib/wm/store'
@@ -164,16 +165,23 @@ export function WindowSwitcher({
                     )}
                   </button>
                   {/* management actions — appear on row hover */}
-                  <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100">
+                  <div className={cn('flex shrink-0 items-center', REVEAL)}>
                     <IconBtn title="重命名" onClick={() => { setEditing(w.index); setEditName(w.name) }}>
                       <Pencil className="size-3.5" />
                     </IconBtn>
-                    <IconBtn title="在此窗口分屏" onClick={() => run({ action: 'split-window', window: w.index, dir: 'h' })}>
-                      <Columns2 className="size-3.5" />
+                    <IconBtn title="在此窗口左右分屏" onClick={() => run({ action: 'split-window', window: w.index, dir: 'h' })}>
+                      <SquareSplitHorizontal className="size-3.5" />
                     </IconBtn>
-                    <IconBtn title="关闭窗口" bad onClick={() => run({ action: 'kill-window', window: w.index })}>
-                      <X className="size-3.5" />
-                    </IconBtn>
+                    <ConfirmPopover
+                      title={`关闭窗口 ${w.index}${w.name ? ' · ' + w.name : ''}？`}
+                      desc="关闭这个 tmux 窗口及其中的所有分屏和进程，不可撤销。"
+                      confirmLabel="关闭窗口"
+                      run={() => run({ action: 'kill-window', window: w.index })}
+                    >
+                      <IconBtn title="关闭窗口" bad>
+                        <X className="size-3.5" />
+                      </IconBtn>
+                    </ConfirmPopover>
                   </div>
                   {w.panes > 1 && (
                     <button
@@ -201,10 +209,17 @@ export function WindowSwitcher({
                         </span>
                       )}
                     </button>
-                    <div className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100">
-                      <IconBtn title="关闭分屏" bad onClick={() => run({ action: 'kill-pane', window: w.index, pane: p.index })}>
-                        <X className="size-3.5" />
-                      </IconBtn>
+                    <div className={cn('shrink-0', REVEAL)}>
+                      <ConfirmPopover
+                        title={`关闭分屏 ${p.index}？`}
+                        desc="关闭这个 tmux 分屏及其中的进程，不可撤销。"
+                        confirmLabel="关闭分屏"
+                        run={() => run({ action: 'kill-pane', window: w.index, pane: p.index })}
+                      >
+                        <IconBtn title="关闭分屏" bad>
+                          <X className="size-3.5" />
+                        </IconBtn>
+                      </ConfirmPopover>
                     </div>
                   </div>
                 ))}
@@ -219,14 +234,19 @@ export function WindowSwitcher({
   )
 }
 
-function IconBtn({ title, bad, onClick, children }: { title: string; bad?: boolean; onClick: () => void; children: ReactNode }) {
+// Row actions: revealed on hover / keyboard focus, always on touch, and held while a confirm is open.
+const REVEAL = 'opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 touch:opacity-100 has-[[data-state=open]]:opacity-100'
+
+// Spreads the rest so it can sit directly under a Popover/Tooltip trigger (asChild).
+function IconBtn({ title, bad, onClick, children, ...rest }: { title: string; bad?: boolean } & ComponentProps<'button'>) {
   return (
     <button
+      {...rest}
       title={title}
       aria-label={title}
       onClick={(e) => {
         e.stopPropagation()
-        onClick()
+        onClick?.(e)
       }}
       className={cn(
         'flex size-6 shrink-0 items-center justify-center rounded',

@@ -75,7 +75,10 @@ main() {
         [ -n "$VERSION" ] || VERSION="local"
         say "installing kore ($VERSION) from local source $KORE_INSTALL_FROM"
         mkdir -p "$TMP/src"
-        (cd "$KORE_INSTALL_FROM" && tar --exclude=.git --exclude=dist --exclude='__pycache__' -cf - .) \
+        # node_modules: the front-end's dev deps (tens of thousands of files, not needed at
+        # runtime — the board serves the prebuilt workbench/index.html).
+        (cd "$KORE_INSTALL_FROM" && tar --exclude=.git --exclude=dist --exclude='__pycache__' \
+            --exclude=node_modules --exclude=.pytest_cache -cf - .) \
             | (cd "$TMP/src" && tar -xf -)
         SRC="$TMP/src"
     else
@@ -96,6 +99,13 @@ main() {
 
     # -- unpack into place ------------------------------------------------------------
     mkdir -p "$INSTALL_DIR/versions" "$BIN_DIR"
+    # kore must run from local disk: on an NFS/GPFS home one stalled open() can freeze the
+    # board for minutes. The default lives under $HOME, which is often exactly such a mount.
+    case "$(stat -f -c %T "$INSTALL_DIR" 2>/dev/null)" in
+        nfs*|cifs|smb*|gpfs|lustre|ceph|glusterfs|fuse.sshfs|9p|afs)
+            say "WARNING: $INSTALL_DIR is on a network filesystem — kore will stall when it does."
+            say "         Reinstall with KORE_INSTALL_DIR=<a local-disk dir>." ;;
+    esac
     DEST="$INSTALL_DIR/versions/$VERSION"
     rm -rf "$DEST"
     mv "$SRC" "$DEST"

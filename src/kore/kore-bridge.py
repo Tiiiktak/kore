@@ -22,6 +22,7 @@ import os
 import re
 import shlex
 import sys
+import tempfile
 import threading
 import time
 from typing import Any
@@ -44,8 +45,12 @@ MAX_OUTPUT_CHARS = int(os.environ.get("KORE_MAX_OUTPUT_CHARS", "20000"))
 # *session* registry above): that one maps a session to where it lives, this one maps a
 # node to the HTTP agent that reaches it. A client's kore-agent writes it (by POSTing to
 # the server's register door); the engine only ever reads it.
-KORE_AGENTS_FILE = os.path.expanduser(
-    os.environ.get("KORE_AGENTS_FILE", "~/.kore/agents.json"))
+# Default is host-LOCAL (not ~/.kore): read on every remote command and rewritten by every
+# heartbeat, it must not sit on an NFS home that can stall one open() for minutes. Keep in
+# sync with cli.RUNTIME_DIR.
+KORE_AGENTS_FILE = os.path.expanduser(os.environ.get("KORE_AGENTS_FILE") or os.path.join(
+    os.environ.get("KORE_RUNTIME_DIR") or os.path.join(tempfile.gettempdir(), f"kore-{os.getuid()}"),
+    "agents.json"))
 # How long an agent's registry entry is trusted after its last heartbeat. Generous on
 # purpose (heartbeat ~15s): a node that flaps for one missed beat must not vanish from
 # the roster. Readers filter by this; nobody deletes a stale entry (flap-safe).
@@ -320,12 +325,18 @@ def is_busy(pane: str) -> bool:
 # own host, so we fetch these over the same sh()/`/exec` path we use for everything else. A
 # session with a usable hook record takes that state; anything else (adopted/pre-hook
 # sessions, or a node where hooks aren't installed) falls back to pane_state() scraping.
-_AGENT_STATE_GLOB = "~/.kore/agent-state"
+#
+# The dir is host-LOCAL (kore-agent's AGENT_STATE_DIR, under the runtime dir): hooks write it
+# on every Claude turn, so it must never sit on an NFS home. Resolved ON THE NODE, in shell:
+# the node's own runtime dir if its agent has made one, else the pre-0.5.7 ~/.kore location —
+# so a client still running an older agent keeps reporting until it is upgraded.
+_HOOK_STATE_DIR = ('d="${KORE_RUNTIME_DIR:-/tmp/kore-$(id -u)}/agent-state"; '
+                   '[ -d "$d" ] || d="$HOME/.kore/agent-state"; ')
 
 
 def node_hook_states(node_ip: str) -> dict[str, dict]:
     """All of a node's hook state records, {session_name: record}, in one round-trip."""
-    cmd = (f'for f in {_AGENT_STATE_GLOB}/*.json; do [ -e "$f" ] || continue; '
+    cmd = (_HOOK_STATE_DIR + 'for f in "$d"/*.json; do [ -e "$f" ] || continue; '
            'printf "%s\\t" "$(basename "$f" .json)"; tr -d "\\n" < "$f"; printf "\\n"; done')
     out: dict[str, dict] = {}
     try:
@@ -354,17 +365,23 @@ _SYS_METRICS_CMD = (
     'echo "CPUS $(nproc 2>/dev/null || echo 0)"; '
     'echo "MEM $(awk \'/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print t, a}\' /proc/meminfo 2>/dev/null)"; '
     'echo "DISK $(df -P -k "$HOME" 2>/dev/null | awk \'NR==2{print $3, $2}\')"; '
-    'echo "KVER $(kore --version 2>/dev/null | awk \'{print $NF}\')"; '
+    'echo "KVER $(kore --version 2>/dev/null | awk \'{print $NF}\')"; ')
+# GPU is opt-in (dashboard setting `sysinfo_gpu`): on a host whose NVIDIA driver is wedged (e.g.
+# kernel module / userland version mismatch) nvidia-smi blocks in uninterruptible sleep — it
+# can't be killed, so every poll strands another process and the whole sweep waits out the
+# timeout, losing load/mem/disk with it.
+_SYS_METRICS_GPU_CMD = (
     'echo GPU_START; '
     'nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total '
     '--format=csv,noheader,nounits 2>/dev/null; echo GPU_END')
 
 
-def node_system_metrics(node_ip: str) -> dict:
+def node_system_metrics(node_ip: str, gpu: bool = False) -> dict:
     """One node's {load1/5/15, cpus, mem_used_kb, mem_total_kb, disk_used_kb, disk_total_kb,
-    gpus:[{util,mem_used,mem_total}]} in a single sh(). {} (not an error) when unreachable."""
+    gpus:[{util,mem_used,mem_total}]} in a single sh(). {} (not an error) when unreachable.
+    `gpus` is only queried when `gpu` is set (see _SYS_METRICS_GPU_CMD); otherwise it's []."""
     try:
-        r = sh(node_ip, _SYS_METRICS_CMD, 15)
+        r = sh(node_ip, _SYS_METRICS_CMD + (_SYS_METRICS_GPU_CMD if gpu else ""), 15)
     except Exception:  # noqa: BLE001 - a slow/absent node must not break the whole sweep
         return {}
     out: dict = {}
@@ -408,7 +425,7 @@ def node_system_metrics(node_ip: str) -> dict:
 
 def _read_hook_state(node_ip: str, name: str) -> dict | None:
     try:
-        r = sh(node_ip, f"cat {_AGENT_STATE_GLOB}/{name}.json 2>/dev/null || true", 15)
+        r = sh(node_ip, _HOOK_STATE_DIR + f'cat "$d/{name}.json" 2>/dev/null || true', 15)
     except Exception:  # noqa: BLE001
         return None
     txt = (r.get("stdout") or "").strip()
@@ -454,9 +471,9 @@ def mark_busy(node_ip: str, name: str) -> None:
     `name` is norm_name-validated (alnum/_/-), so it is safe to interpolate into the path."""
     try:
         sh(node_ip,
-           f'mkdir -p {_AGENT_STATE_GLOB} && t=$(date +%s) && '
+           _HOOK_STATE_DIR + 't=$(date +%s) && '
            'printf \'{"state":"busy","since":%s,"event":"kore-input","ts":%s}\' "$t" "$t" '
-           f'> {_AGENT_STATE_GLOB}/{name}.json',
+           f'> "$d/{name}.json"',
            15)
     except Exception:  # noqa: BLE001 - best-effort; the real hooks are authoritative
         pass

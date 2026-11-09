@@ -210,7 +210,8 @@ below is a `KORE_*` name — that is the only spelling the code reads.
 | env | default | meaning |
 |---|---|---|
 | `KORE_AGENT_TOKEN` | *(minted)* | server↔client agent secret, and the client-join token. `kore server` mints one (`~/.kore/agent.token`, 0600) if unset. A client agent refuses to bind non-loopback without it. |
-| `KORE_AGENTS_FILE` | `~/.kore/agents.json` | the client-agent registry (node_ip → url) the server writes |
+| `KORE_RUNTIME_DIR` | `/tmp/kore-<uid>` | host-local hot state: board/client logs and pid files, the `ccops/` ledgers, the agent registry, the hooks' `agent-state/`. Kept off `~/.kore` on purpose: a shared NFS/GPFS home can stall one file open for minutes, which froze the board and dropped every client. `~/.kore` keeps only durable state (tokens, labels, config, session registry). Install kore itself on local disk too (`kore doctor` checks both). |
+| `KORE_AGENTS_FILE` | `$KORE_RUNTIME_DIR/agents.json` | the client-agent registry (node_ip → url) the server writes |
 | `KORE_AGENT_TTL` | `45` | seconds before a silent client is pruned from the roster |
 | `KORE_AGENT_PORT` | `8199` | client agent bind port (falls back to a free port when 8199 is taken); `0` = always OS-chosen |
 | `KORE_AGENT_BIND` | `0.0.0.0` | client agent bind address |

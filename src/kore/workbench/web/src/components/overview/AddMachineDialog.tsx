@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { Check, Copy } from 'lucide-react'
 import {
   Dialog,
   DialogContent,
@@ -8,6 +7,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { apiGet } from '@/lib/api'
+import { CopyLine } from '@/components/CopyLine'
 
 interface JoinInfo {
   ok: boolean
@@ -36,22 +36,32 @@ export function AddMachineDialog({ open, onOpenChange }: { open: boolean; onOpen
       <DialogContent className="sm:max-w-[520px]">
         <DialogHeader>
           <DialogTitle>添加机器</DialogTitle>
-          <DialogDescription>在另一台机器上运行下面这行，它就会作为 worker 节点加入（不改任何现有会话）。</DialogDescription>
+          <DialogDescription>在另一台机器上运行下面这行，它就会作为 client 加入（不改任何现有 session）。</DialogDescription>
         </DialogHeader>
         {err && <div className="text-bad text-sm">{err}</div>}
         {info && (
           <div className="flex min-w-0 flex-col gap-3">
             {info.enabled && info.command ? (
-              <CopyLine label="在新机器上运行" text={info.command} />
+              <>
+                {/* install + join in one paste; the launcher's full path, because a fresh
+                    install's bin dir is not on this shell's PATH yet */}
+                <CopyLine
+                  label="在新机器上运行（安装并加入）"
+                  text={`${info.install} && "$HOME/.local/bin/kore" ${info.command.replace(/^kore /, '')}`}
+                />
+                <CopyLine label="已装过 kore？只需加入" text={info.command} />
+              </>
             ) : (
-              <div className="text-muted-foreground bg-muted rounded-md px-3 py-2 text-xs">
-                服务端未配置 agent token（<span className="font-mono">KORE_AGENT_TOKEN</span>），暂时无法加入新机器。
-              </div>
+              <>
+                <div className="text-muted-foreground bg-muted rounded-md px-3 py-2 text-xs">
+                  服务端未配置 agent token（<span className="font-mono">KORE_AGENT_TOKEN</span>），暂时无法加入新机器。
+                </div>
+                <CopyLine label="安装 kore" text={info.install} />
+              </>
             )}
-            <CopyLine label="（没装 kore？先装）" text={info.install} />
             <div>
               <div className="text-muted-foreground mb-1.5 text-xs">已加入的机器</div>
-              {info.clients.length === 0 && <div className="text-muted-foreground text-xs">还没有 client 机器加入。</div>}
+              {info.clients.length === 0 && <div className="text-muted-foreground text-xs">还没有 client 加入。</div>}
               <div className="flex flex-col gap-1">
                 {info.clients.map((c) => (
                   <div key={c.node_ip} className="flex min-w-0 items-center gap-2 text-xs">
@@ -59,7 +69,7 @@ export function AddMachineDialog({ open, onOpenChange }: { open: boolean; onOpen
                     <span className="shrink-0 font-medium">{c.hostname || c.node_ip}</span>
                     <span className="text-muted-foreground min-w-0 truncate font-mono">{c.node_ip}</span>
                     <span className="text-muted-foreground ml-auto shrink-0 whitespace-nowrap">
-                      {c.online ? `${c.sessions} 个会话` : `${c.last_seen_s}s 前离线`}
+                      {c.online ? `${c.sessions} 个 session` : `${c.last_seen_s}s 前离线`}
                     </span>
                   </div>
                 ))}
@@ -69,32 +79,5 @@ export function AddMachineDialog({ open, onOpenChange }: { open: boolean; onOpen
         )}
       </DialogContent>
     </Dialog>
-  )
-}
-
-function CopyLine({ label, text }: { label: string; text: string }) {
-  const [copied, setCopied] = useState(false)
-  return (
-    <div className="min-w-0">
-      <div className="text-muted-foreground mb-1.5 text-xs">{label}</div>
-      <div className="bg-secondary flex min-w-0 items-center gap-2 rounded-md p-1 pl-3">
-        <code className="min-w-0 flex-1 truncate font-mono text-xs">{text}</code>
-        <button
-          onClick={() => {
-            navigator.clipboard?.writeText(text).then(
-              () => {
-                setCopied(true)
-                setTimeout(() => setCopied(false), 1500)
-              },
-              () => {},
-            )
-          }}
-          aria-label="复制"
-          className="text-muted-foreground hover:bg-accent hover:text-foreground flex size-7 shrink-0 items-center justify-center rounded"
-        >
-          {copied ? <Check className="size-4 text-[var(--ok)]" /> : <Copy className="size-4" />}
-        </button>
-      </div>
-    </div>
   )
 }

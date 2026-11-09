@@ -21,6 +21,7 @@ export interface Workspace {
   root: Node
   focused: string | null
   zoom: string | null
+  group?: string // custom-group id (lib/tabgroups); undefined = ungrouped
 }
 
 // The space between panes = the width of the hairline divider drawn by the sash. One workspace

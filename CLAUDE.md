@@ -46,6 +46,15 @@ Cutting a frontend change over to the served board is a copy:
   MAX_ARG_STRLEN (128 KiB), not the 2 MB total ARG_MAX.** The fixed fs-write script chunks
   uploads to stay under it (`kore.fs.put_chunk_bytes`, 48 KiB raw); never build a bigger
   single argument to `sh()`.
+- **Never run kore from, or write hot state to, an NFS/GPFS mount.** One `open()`/`fsync()`
+  there can stall for minutes (measured: 253s), and under Python 3.10 a child spawned while
+  the parent holds any NFS fd freezes the whole board (`vfork` waits with the GIL held).
+  The split: code + `KORE_RUNTIME_DIR` (logs, pid/run, `ccops/` ledgers, `agents.json`,
+  hook `agent-state/`; host-local, default `/tmp/kore-<uid>`) vs `KORE_STATE_HOME`
+  (`~/.kore`: tokens, labels, config, `sessions.json` — durable, read at start/on change).
+  `kore doctor` warns if the install or runtime dir is on a network fs. On this host the
+  board runs from the local clone `/root/kore` (launcher `/root/.local/bin/kore`); edits
+  in the NFS dev repo only go live once synced there.
 - The hyphenated scripts (`kore-bridge.py`, `kore-agent.py`) are run BY PATH, not imported —
   see CONTRIBUTING.md before renaming.
 - `dispatch-allowlist.json` (`kore` section) IS the write policy — editing it is config, not

@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react'
-import { toast } from 'sonner'
 import {
   Dialog,
   DialogContent,
@@ -11,23 +10,21 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { kPost } from '@/lib/api'
+import { useSessionCreate } from '@/hooks/useSessionCreate'
+import { DirPicker } from '@/components/DirPicker'
 import { buildNodes, emptyLabels, nodeName, nodeOrder } from '@/lib/kore'
 import type { Roster } from '@/lib/types'
 
-// Create a new kore session: POST /api/kore/start {node_ip, name, cwd, role}. Per the backend,
-// this only TYPES the launch command into the new tmux session (no auto-Enter); the roster
-// refreshes a moment later so the new session appears.
+// Create a new kore session from the overview, via the shared create flow (useSessionCreate).
+// It doesn't open the session — the card appears in the overview once the roster catches up.
 export function NewSessionDialog({
   open,
   onOpenChange,
   roster,
-  onCreated,
 }: {
   open: boolean
   onOpenChange: (v: boolean) => void
   roster: Roster | null
-  onCreated: () => void
 }) {
   const prefix = roster?.prefix || 'kore-'
   const labels = roster?.labels || emptyLabels
@@ -39,30 +36,28 @@ export function NewSessionDialog({
   const [cwd, setCwd] = useState('~')
   const [role, setRole] = useState('')
   const [busy, setBusy] = useState(false)
+  const create = useSessionCreate()
 
+  // Reset only when the dialog OPENS. `nodes`/`ips` are rebuilt on every roster poll (~6s),
+  // so keying the reset on them wiped whatever the user had picked or typed mid-dialog.
   useEffect(() => {
-    if (open) {
-      setNode(ips.find((i) => nodes[i]?.self) || ips[0] || '')
-      setName('')
-      setCwd('~')
-      setRole('')
-    }
-  }, [open, ips, nodes])
+    if (!open) return
+    setNode('')
+    setName('')
+    setCwd('~')
+    setRole('')
+  }, [open])
+  // Default machine: once the list is there and nothing is picked yet (also covers a
+  // roster that was still loading when the dialog opened).
+  useEffect(() => {
+    if (open && !node && ips.length) setNode(ips.find((i) => nodes[i]?.self) || ips[0])
+  }, [open, node, ips, nodes])
 
   const submit = async () => {
-    const n = name.trim()
-    if (!n || !node) return
     setBusy(true)
-    try {
-      await kPost('start', { node_ip: node, name: n, cwd: cwd.trim() || '~', role: role.trim() })
-      onOpenChange(false)
-      toast('已新建会话', { description: `${prefix}${n} · 启动命令已输入，在终端里按 Enter 启动` })
-      setTimeout(onCreated, 2500)
-    } catch (e) {
-      toast.error('新建失败', { description: (e as Error).message })
-    } finally {
-      setBusy(false)
-    }
+    const ok = await create.run(node, name, cwd, role)
+    setBusy(false)
+    if (ok) onOpenChange(false)
   }
 
   return (
@@ -70,7 +65,7 @@ export function NewSessionDialog({
       <DialogContent className="sm:max-w-[440px]">
         <DialogHeader>
           <DialogTitle>新建 session</DialogTitle>
-          <DialogDescription>在选定机器上建一个 tmux 会话并输入启动命令（不自动回车）。</DialogDescription>
+          <DialogDescription>在选定机器上建一个 tmux session 并输入启动命令（不自动回车）。</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3 py-1">
           <Field label="机器">
@@ -97,7 +92,7 @@ export function NewSessionDialog({
             />
           </Field>
           <Field label="工作目录">
-            <Input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="~" />
+            <DirPicker nodeIp={node} value={cwd} onChange={setCwd} disabled={!node} />
           </Field>
           <Field label="角色说明（可空，仅备注）">
             <Input value={role} onChange={(e) => setRole(e.target.value)} placeholder="做什么用的" />

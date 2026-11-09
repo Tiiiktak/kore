@@ -54,7 +54,7 @@ export function QuickSwitch({ winId, onPicked }: { winId: string; onPicked?: () 
   return (
     <div className="flex flex-col gap-2">
       <div className="text-muted-foreground px-1 text-xs">切换到…</div>
-      <Input value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={nav.onKeyDown} placeholder="过滤会话 / 机器" aria-label="过滤会话" autoFocus />
+      <Input value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={nav.onKeyDown} placeholder="过滤 session / 机器" aria-label="过滤 session" autoFocus />
       <ScrollArea className="max-h-[42vh]">
         <div className="flex flex-col gap-0.5 pr-2">
           {shown.map((s, i) => (
@@ -72,7 +72,7 @@ export function QuickSwitch({ winId, onPicked }: { winId: string; onPicked?: () 
             />
           ))}
           {!shown.length && (
-            <div className="text-muted-foreground py-3 text-center text-xs">{rows.length ? '没有匹配的会话' : '还没有会话'}</div>
+            <div className="text-muted-foreground py-3 text-center text-xs">{rows.length ? '没有匹配的 session' : '还没有 session'}</div>
           )}
         </div>
       </ScrollArea>

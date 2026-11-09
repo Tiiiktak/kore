@@ -62,6 +62,30 @@ export async function kFsWrite<T = unknown>(
   return d as T
 }
 
+// ---- file-browser reads (directory navigation) ----------------------------------------
+// Shared read helpers over the node's fs endpoints (path policy enforced node-side after
+// realpath): roots = $HOME + each session's live cwd; list returns a dir's entries.
+export interface FsEntry {
+  name: string
+  kind: 'dir' | 'file' | 'link' | 'other'
+}
+export interface FsRoot {
+  label: string
+  path: string
+}
+export const kFsRoots = (nodeIp: string) =>
+  apiGet<{ ok: boolean; roots?: FsRoot[]; error?: string }>(
+    '/api/kore/fs/roots?node_ip=' + encodeURIComponent(nodeIp),
+  )
+export const kFsList = (nodeIp: string, path: string, hidden = false) =>
+  apiGet<{ ok: boolean; entries?: FsEntry[]; error?: string }>(
+    '/api/kore/fs/list?node_ip=' +
+      encodeURIComponent(nodeIp) +
+      '&path=' +
+      encodeURIComponent(path) +
+      (hidden ? '&hidden=1' : ''),
+  )
+
 export interface ReadBResp {
   ok: boolean
   data: string // base64 of this range
@@ -156,6 +180,7 @@ export const kSysinfo = (force = false): Promise<SysinfoResp> =>
 export interface KoreConfig {
   upgrade_proxy: string
   no_proxy: string
+  sysinfo_gpu: string // "1" = overview metrics also query nvidia-smi
 }
 
 export const kConfigGet = (): Promise<{ ok: boolean; config: KoreConfig }> =>
@@ -188,3 +213,35 @@ export async function setLabel(kind: 'node' | 'session', key: string, name: stri
     throw new Error((d as any).error || 'HTTP ' + r.status)
   }
 }
+
+// ---- share links (owner side: board token) ---------------------------------------------
+export type ShareScope = 'read' | 'chat'
+export interface Share {
+  id: string
+  node_ip: string
+  name: string
+  scope: ShareScope
+  label: string
+  created_at: number
+  expires_at: number
+  token?: string // only in the create response, shown once
+}
+
+export const kSharesList = (nodeIp: string, name: string): Promise<{ ok: boolean; shares: Share[] }> =>
+  apiGet(`/api/kore/shares?node_ip=${encodeURIComponent(nodeIp)}&name=${encodeURIComponent(name)}`)
+
+async function sharePost<T>(path: string, body: unknown): Promise<T> {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  })
+  const d = await r.json().catch(() => ({ error: 'HTTP ' + r.status }))
+  if (!r.ok) throw new Error((d as any).refused || (d as any).error || 'HTTP ' + r.status)
+  return d as T
+}
+
+export const kShareCreate = (b: { node_ip: string; name: string; scope: ShareScope; ttl_s: number; label?: string }) =>
+  sharePost<{ ok: boolean; share: Share }>('/api/kore/shares', b).then((d) => d.share)
+
+export const kShareRevoke = (id: string) => sharePost<{ ok: boolean }>('/api/kore/shares/revoke', { id })

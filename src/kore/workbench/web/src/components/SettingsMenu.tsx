@@ -1,12 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
-import { ChevronRight, Download, Monitor, Moon, RefreshCw, Settings, Sun } from 'lucide-react'
-import { toast } from 'sonner'
+import { useEffect, useState } from 'react'
+import { ChevronRight, Monitor, Moon, Settings, Sun } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { applyTheme, getTheme, setTheme, type Theme } from '@/lib/theme'
 import { fontGet, fontSet, rendererGet, type Renderer } from '@/lib/term/settings'
+import { canNotify, requestNotifyPermission, setNotifySettings, useNotifySettings } from '@/lib/notify'
+import { setMode, useTabGroups, type GroupMode } from '@/lib/tabgroups'
 import { broadcastTerminalSettings } from '@/lib/term/terminal'
-import { kConfigGet, kConfigSet, kLatest, kNode, type LatestResp } from '@/lib/api'
+import { Hint } from '@/components/Hint'
+import { setUi } from '@/lib/ui'
+import { kConfigGet, kConfigSet } from '@/lib/api'
+import { toast } from 'sonner'
 import { useRosterCtx } from '@/lib/roster-context'
 import { cn } from '@/lib/utils'
 
@@ -19,6 +23,11 @@ const RENDERERS: { v: Renderer; label: string }[] = [
   { v: 'auto', label: '自动' },
   { v: 'dom', label: 'DOM' },
   { v: 'webgl', label: 'WebGL' },
+]
+const GROUP_MODES: { v: GroupMode; label: string }[] = [
+  { v: 'none', label: '无' },
+  { v: 'machine', label: '按机器' },
+  { v: 'custom', label: '自定义' },
 ]
 
 function Seg<T extends string>({
@@ -33,19 +42,21 @@ function Seg<T extends string>({
   return (
     <div className="bg-muted flex items-center gap-0.5 rounded-md p-0.5">
       {options.map(({ v, label, icon: Icon }) => (
-        <button
-          key={v}
-          onClick={() => onPick(v)}
-          aria-pressed={value === v}
-          title={label}
-          className={cn(
-            'flex items-center gap-1 rounded-sm px-2 py-1 text-xs transition-colors',
-            value === v ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
-          )}
-        >
-          {Icon && <Icon className="size-3.5" />}
-          {label && !Icon && label}
-        </button>
+        // icon-only options get a hover hint; text options already say what they are
+        <Hint key={v} label={Icon ? label : ''}>
+          <button
+            onClick={() => onPick(v)}
+            aria-pressed={value === v}
+            aria-label={label}
+            className={cn(
+              'flex items-center gap-1 rounded-sm px-2 py-1 text-xs transition-colors',
+              value === v ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+            )}
+          >
+            {Icon && <Icon className="size-3.5" />}
+            {label && !Icon && label}
+          </button>
+        </Hint>
       ))}
     </div>
   )
@@ -60,7 +71,134 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   )
 }
 
+// iOS-style switch; knob is bg-background so it reads in both themes.
+function Switch({ checked, onChange, disabled }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={cn(
+        'relative h-5 w-9 shrink-0 rounded-full transition-colors',
+        disabled ? 'cursor-not-allowed opacity-40' : '',
+        checked ? 'bg-[var(--claude)]' : 'bg-muted',
+      )}
+    >
+      <span
+        className={cn('bg-background absolute top-0.5 size-4 rounded-full shadow transition-all', checked ? 'left-[18px]' : 'left-0.5')}
+      />
+    </button>
+  )
+}
+
+function EventPill({ on, onClick, children }: { on: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={on}
+      className={cn(
+        'rounded-sm px-2 py-1 text-xs transition-colors',
+        on ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
+// GPU metrics in the overview's machine strip. A BOARD setting (server config, shared by every
+// device), off by default: it runs nvidia-smi on every node each poll, which hangs on a host
+// with a broken NVIDIA driver.
+function GpuMetricsRow({ open }: { open: boolean }) {
+  const [on, setOn] = useState<boolean | null>(null)
+  useEffect(() => {
+    if (!open) return
+    kConfigGet()
+      .then((r) => setOn(r.config?.sysinfo_gpu === '1'))
+      .catch(() => {})
+  }, [open])
+  const flip = async (v: boolean) => {
+    setOn(v)
+    try {
+      await kConfigSet({ sysinfo_gpu: v ? '1' : '' })
+    } catch (e) {
+      setOn(!v)
+      toast.error('保存失败', { description: (e as Error).message })
+    }
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      <Row label="GPU 指标">
+        <Switch checked={!!on} disabled={on === null} onChange={flip} />
+      </Row>
+      <p className="text-muted-foreground text-[11px] leading-relaxed">在各机器上运行 nvidia-smi；驱动异常的机器上它会卡住。对所有设备生效。</p>
+    </div>
+  )
+}
+
+// Workspace-tab grouping mode. Custom groups themselves are made/assigned from each tab's
+// right-click menu (WorkspaceTabs); this just picks how the strip is bucketed.
+function TabGroupRow() {
+  const tg = useTabGroups()
+  return (
+    <Row label="标签分组">
+      <Seg value={tg.mode} options={GROUP_MODES} onPick={setMode} />
+    </Row>
+  )
+}
+
+// Notification prefs — browser (Notification API) + sound (WebAudio beep) + which events fire.
+// All alerts route through lib/notify; this is just its control surface.
+function NotifySection() {
+  const s = useNotifySettings()
+  const supported = canNotify()
+
+  const toggleBrowser = async (v: boolean) => {
+    if (v && typeof Notification !== 'undefined' && Notification.permission !== 'granted') {
+      const ok = await requestNotifyPermission()
+      if (!ok) {
+        setNotifySettings({ browser: false })
+        return
+      }
+    }
+    setNotifySettings({ browser: v })
+  }
+
+  return (
+    <div className="flex flex-col gap-2.5 border-t pt-2.5">
+      <Row label="浏览器通知">
+        <Switch checked={s.browser && supported} disabled={!supported} onChange={toggleBrowser} />
+      </Row>
+      {!supported && (
+        <p className="text-muted-foreground text-[11px] leading-relaxed">
+          浏览器通知需安全上下文：从 <kbd className="bg-muted rounded px-1">127.0.0.1</kbd>/localhost 或 HTTPS 打开才可用。
+        </p>
+      )}
+      <Row label="声音提示">
+        <Switch checked={s.sound} onChange={(v) => setNotifySettings({ sound: v })} />
+      </Row>
+      <Row label="通知事件">
+        <div className="bg-muted flex items-center gap-0.5 rounded-md p-0.5">
+          <EventPill on={s.events.waiting} onClick={() => setNotifySettings({ events: { waiting: !s.events.waiting } })}>
+            需要你
+          </EventPill>
+          <EventPill on={s.events.done} onClick={() => setNotifySettings({ events: { done: !s.events.done } })}>
+            刚完成
+          </EventPill>
+        </div>
+      </Row>
+    </div>
+  )
+}
+
+// Everyday display + notification prefs only. Version / upgrade / rollback / proxy are ops,
+// not preferences — they live in the 版本与升级 dialog (SystemDialog) behind the last row.
 export function SettingsMenu() {
+  const { roster } = useRosterCtx()
+  const [open, setOpen] = useState(false)
   const [theme, setThemeState] = useState<Theme>(getTheme)
   const [renderer, setRendererState] = useState<Renderer>(rendererGet)
   const [font, setFontState] = useState<number>(fontGet)
@@ -92,7 +230,13 @@ export function SettingsMenu() {
   }
 
   return (
-    <Popover>
+    <Popover
+      open={open}
+      onOpenChange={(v) => {
+        setOpen(v)
+        if (v) setThemeState(getTheme()) // the ⌘K palette can change it too
+      }}
+    >
       <PopoverTrigger asChild>
         <Button variant="ghost" size="icon" className="size-8" aria-label="设置">
           <Settings />
@@ -103,9 +247,12 @@ export function SettingsMenu() {
           <Row label="外观">
             <Seg value={theme} options={THEMES} onPick={pickTheme} />
           </Row>
-          <Row label="终端渲染器">
-            <Seg value={renderer} options={RENDERERS} onPick={pickRenderer} />
-          </Row>
+          <div className="flex flex-col gap-1">
+            <Row label="终端渲染器">
+              <Seg value={renderer} options={RENDERERS} onPick={pickRenderer} />
+            </Row>
+            <p className="text-muted-foreground text-[11px] leading-relaxed">WebGL 在非整数缩放下字缘会发虚；「自动」会在那时改用 DOM。</p>
+          </div>
           <Row label="终端字号">
             <div className="flex items-center gap-1">
               <Button variant="outline" size="icon" className="size-7" onClick={() => bumpFont(-1)} aria-label="字号减小">
@@ -117,10 +264,26 @@ export function SettingsMenu() {
               </Button>
             </div>
           </Row>
-          <VersionSection />
-          <AdvancedSection />
-          <p className="text-muted-foreground border-t pt-2 text-xs leading-relaxed">
-            WebGL 在非整数缩放下字缘会发虚；「自动」会在那种情况下用 DOM。按 <kbd className="bg-muted rounded px-1">⌘K</kbd> 打开命令面板。
+          <TabGroupRow />
+          <GpuMetricsRow open={open} />
+          <NotifySection />
+          <div className="border-t pt-1.5">
+            <button
+              onClick={() => {
+                setOpen(false)
+                setUi({ system: true })
+              }}
+              className="hover:bg-accent -mx-1.5 flex w-[calc(100%+0.75rem)] items-center justify-between rounded-md px-1.5 py-1 text-left"
+            >
+              <span className="text-sm font-medium">版本与升级</span>
+              <span className="text-muted-foreground flex items-center gap-1 text-xs tabular-nums">
+                {roster?.version || '—'}
+                <ChevronRight className="size-3.5" />
+              </span>
+            </button>
+          </div>
+          <p className="text-muted-foreground text-xs leading-relaxed">
+            按 <kbd className="bg-muted rounded px-1">⌘K</kbd> 打开命令面板。
           </p>
         </div>
       </PopoverContent>
@@ -128,184 +291,3 @@ export function SettingsMenu() {
   )
 }
 
-// A two-step (arm → confirm) action: the first click arms for `ms`, the second fires `run`.
-// Shared by the latest-upgrade and the pinned-install/rollback buttons.
-function useArmed(run: () => Promise<void>, ms = 3000) {
-  const [armed, setArmed] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const t = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const trigger = async () => {
-    if (!armed) {
-      setArmed(true)
-      if (t.current) clearTimeout(t.current)
-      t.current = setTimeout(() => setArmed(false), ms)
-      return
-    }
-    if (t.current) clearTimeout(t.current)
-    setArmed(false)
-    setBusy(true)
-    try {
-      await run()
-    } finally {
-      setBusy(false)
-    }
-  }
-  return { armed, busy, trigger }
-}
-
-const SEMVER = /^v?\d+\.\d+\.\d+$/
-
-// Installed build + check-latest / upgrade for THIS board. `current` rides the roster poll
-// (self-heals after the restart); the check hits /api/kore/latest (server-cached). Upgrade runs
-// `kore upgrade && kore server --restart`; the board briefly drops and reconnects, then the
-// version updates itself. Rollback (install a specific tag) lives in 高级 below.
-function VersionSection() {
-  const { roster } = useRosterCtx()
-  const current = roster?.version
-  const [latest, setLatest] = useState<LatestResp | null>(null)
-  const [checking, setChecking] = useState(false)
-
-  const check = async () => {
-    setChecking(true)
-    try {
-      setLatest(await kLatest(true))
-    } catch (e) {
-      toast.error('检查更新失败', { description: (e as Error).message })
-    } finally {
-      setChecking(false)
-    }
-  }
-  const up = useArmed(async () => {
-    try {
-      await kNode('server', 'upgrade')
-      toast('正在升级并重启板子', { description: '完成后会自动重连，版本号随后自动刷新' })
-    } catch (e) {
-      toast.error('升级失败', { description: (e as Error).message })
-    }
-  })
-
-  return (
-    <div className="flex flex-col gap-2 border-t pt-2.5">
-      <Row label="版本">
-        <div className="flex items-center gap-1.5">
-          <span className="text-muted-foreground text-xs tabular-nums">{current || '—'}</span>
-          <Button variant="outline" size="sm" className="h-7" onClick={check} disabled={checking}>
-            <RefreshCw className={cn('size-3.5', checking && 'animate-spin')} />
-            检查更新
-          </Button>
-        </div>
-      </Row>
-      {latest &&
-        (latest.ok ? (
-          latest.outdated ? (
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs">
-                新版本 <span className="font-semibold text-[var(--claude)]">{latest.latest}</span> 可用
-              </span>
-              <Button variant={up.armed ? 'destructive' : 'default'} size="sm" className="h-7" onClick={up.trigger} disabled={up.busy}>
-                {!up.busy && <Download className="size-3.5" />}
-                {up.busy ? '升级中…' : up.armed ? '确认升级并重启' : '升级并重启'}
-              </Button>
-            </div>
-          ) : (
-            <p className="text-muted-foreground text-xs">已是最新（{latest.latest}）</p>
-          )
-        ) : (
-          <p className="text-xs text-[var(--bad)]">检查失败：{latest.error}</p>
-        ))}
-    </div>
-  )
-}
-
-// Rarely-touched knobs, folded behind a 高级 disclosure so the menu stays short:
-//   • 指定版本回滚 — install any tag (type an older one to roll back).
-//   • 升级代理     — the proxy the board uses to reach github.com for 检查更新 / 升级 (intranet
-//     nodes usually can't hit GitHub directly). Saved to ~/.kore/config.json (0600, local,
-//     uncommitted, never logged; may carry credentials). Empty = direct.
-function AdvancedSection() {
-  const [open, setOpen] = useState(false)
-  const [pin, setPin] = useState('')
-  const [proxy, setProxy] = useState('')
-  const [savingProxy, setSavingProxy] = useState(false)
-
-  useEffect(() => {
-    if (!open) return
-    kConfigGet()
-      .then((r) => setProxy(r.config?.upgrade_proxy || ''))
-      .catch(() => {})
-  }, [open])
-
-  const pinUp = useArmed(async () => {
-    const v = pin.trim()
-    try {
-      await kNode('server', 'upgrade', { version: v })
-      toast(`正在安装 ${v} 并重启`, { description: '完成后会自动重连' })
-    } catch (e) {
-      toast.error('安装失败', { description: (e as Error).message })
-    }
-  })
-  const saveProxy = async () => {
-    setSavingProxy(true)
-    try {
-      await kConfigSet({ upgrade_proxy: proxy.trim() })
-      toast('已保存升级代理')
-    } catch (e) {
-      toast.error('保存失败', { description: (e as Error).message })
-    } finally {
-      setSavingProxy(false)
-    }
-  }
-
-  return (
-    <div className="flex flex-col gap-2 border-t pt-2">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs font-medium"
-      >
-        <ChevronRight className={cn('size-3.5 transition-transform', open && 'rotate-90')} />
-        高级
-      </button>
-      {open && (
-        <div className="flex flex-col gap-3 pl-1">
-          <div className="flex flex-col gap-1.5">
-            <span className="text-muted-foreground text-[11px]">指定版本回滚 / 安装</span>
-            <div className="flex items-center gap-1.5">
-              <input
-                value={pin}
-                onChange={(e) => setPin(e.target.value)}
-                placeholder="如 v0.5.2"
-                spellCheck={false}
-                className="bg-muted focus:ring-ring min-w-0 flex-1 rounded-md px-2 py-1 font-mono text-xs outline-none focus:ring-1"
-              />
-              <Button
-                variant={pinUp.armed ? 'destructive' : 'outline'}
-                size="sm"
-                className="h-7 shrink-0"
-                onClick={pinUp.trigger}
-                disabled={pinUp.busy || !SEMVER.test(pin.trim())}
-              >
-                {pinUp.busy ? '安装中…' : pinUp.armed ? '确认安装' : '安装'}
-              </Button>
-            </div>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <span className="text-muted-foreground text-[11px]">升级代理（访问 GitHub，留空 = 直连）</span>
-            <div className="flex items-center gap-1.5">
-              <input
-                value={proxy}
-                onChange={(e) => setProxy(e.target.value)}
-                placeholder="http://user:pass@host:port"
-                spellCheck={false}
-                autoComplete="off"
-                className="bg-muted focus:ring-ring min-w-0 flex-1 rounded-md px-2 py-1 font-mono text-xs outline-none focus:ring-1"
-              />
-              <Button variant="outline" size="sm" className="h-7 shrink-0" onClick={saveProxy} disabled={savingProxy}>
-                保存
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}

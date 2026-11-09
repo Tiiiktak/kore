@@ -1,20 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CircleFadingArrowUp, Plus, RefreshCw, RotateCw, Server } from 'lucide-react'
+import { ChevronDown, CircleFadingArrowUp, Import, Plus, RefreshCw, RotateCw, Server, TerminalSquare, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { kNode, type NodeMetrics } from '@/lib/api'
 import { useSysinfo } from '@/hooks/useSysinfo'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { ConfirmPopover } from '@/components/ConfirmPopover'
+import { Hint } from '@/components/Hint'
 import { SessionCard } from './SessionCard'
-import { StatusDot } from '@/components/StatusDot'
 import { NewSessionDialog } from './NewSessionDialog'
 import { AddMachineDialog } from './AddMachineDialog'
 import { AdoptDialog } from './AdoptDialog'
-import { RenameDialog, type RenameTarget } from './RenameDialog'
+import { RenameDialog } from './RenameDialog'
 import { useRosterCtx } from '@/lib/roster-context'
 import { useStars } from '@/hooks/useStars'
 import { effectiveState, markActed, useSeenVersion } from '@/lib/seen'
 import { useWmVersion, wmStore } from '@/lib/wm/store'
+import { setUi, useUi } from '@/lib/ui'
 import {
   STATE_LABEL,
   buildNodes,
@@ -35,27 +43,37 @@ export interface OpenPayload {
   nodes: Record<string, NodeView>
 }
 
+// The KPI tiles double as the state filter. '' = all states.
+type StFilter = '' | 'waiting' | 'busy' | 'done'
+const ST_TILES: Array<{ st: Exclude<StFilter, ''>; label: string; tone: string }> = [
+  { st: 'waiting', label: STATE_LABEL.waiting, tone: 'text-st-waiting' },
+  { st: 'busy', label: STATE_LABEL.busy, tone: 'text-st-busy' },
+  { st: 'done', label: STATE_LABEL.done, tone: 'text-st-done' },
+]
+
 export function Overview({ onOpen }: { onOpen: (p: OpenPayload) => void }) {
   const { roster, loading, error, refreshing, refresh, fetchedAt } = useRosterCtx()
   const sysinfo = useSysinfo()
   const { stars, toggle } = useStars()
+  const ui = useUi()
   useSeenVersion()
   useWmVersion()
   const visible = wmStore.visibleSessionKeys()
-  const [filter, setFilter] = useState('') // '' = all, else node_ip
-  const [newOpen, setNewOpen] = useState(false)
-  const [joinOpen, setJoinOpen] = useState(false)
-  const [adoptOpen, setAdoptOpen] = useState(false)
-  const [rename, setRename] = useState<RenameTarget | null>(null)
+  const [filter, setFilter] = useState('') // '' = all machines, else node_ip
+  const [stFilter, setStFilter] = useState<StFilter>('')
 
   const prefix = roster?.prefix || 'kore-'
   const labels = roster?.labels || emptyLabels
   const nodes = useMemo<Record<string, NodeView>>(() => buildNodes(roster?.nodes || []), [roster])
+  const all = roster?.sessions || []
+  // the state each card actually shows (acted-on waiting → busy, unseen idle → done); counts and
+  // the state filter use it too, so a tile never disagrees with the dots below it
+  const shownState = (s: Session) => effectiveState(s, visible, fetchedAt)
 
   // star-pinned stable sort, then group by node in node order
   const rows = useMemo(() => {
-    const all = (roster?.sessions || []).slice()
-    all.sort((a, b) => {
+    const out = all.slice()
+    out.sort((a, b) => {
       const sa = stars.has(sessKey(a)) ? 0 : 1
       const sb = stars.has(sessKey(b)) ? 0 : 1
       if (sa !== sb) return sa - sb
@@ -63,20 +81,17 @@ export function Overview({ onOpen }: { onOpen: (p: OpenPayload) => void }) {
       const nb = nodeOrder(b.node_ip, nodes)
       return na < nb ? -1 : na > nb ? 1 : 0
     })
-    return filter ? all.filter((s) => s.node_ip === filter) : all
-  }, [roster, stars, nodes, filter])
+    return out.filter((s) => (!filter || s.node_ip === filter) && (!stFilter || shownState(s) === stFilter))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roster, stars, nodes, filter, stFilter, fetchedAt, visible.size])
 
-  const counts = useMemo(() => {
-    const c: Record<string, number> = {}
-    for (const s of roster?.sessions || []) c[s.node_ip] = (c[s.node_ip] || 0) + 1
-    return c
-  }, [roster])
-
-  const stateCounts = useMemo(() => {
-    const c: Record<string, number> = {}
-    for (const s of roster?.sessions || []) c[s.state] = (c[s.state] || 0) + 1
-    return c
-  }, [roster])
+  const counts: Record<string, number> = {}
+  for (const s of all) counts[s.node_ip] = (counts[s.node_ip] || 0) + 1
+  const stateCounts: Record<string, number> = {}
+  for (const s of all) {
+    const st = shownState(s)
+    stateCounts[st] = (stateCounts[st] || 0) + 1
+  }
 
   const nodeIps = useMemo(
     () => Object.keys(nodes).sort((a, b) => (nodeOrder(a, nodes) < nodeOrder(b, nodes) ? -1 : 1)),
@@ -87,7 +102,7 @@ export function Overview({ onOpen }: { onOpen: (p: OpenPayload) => void }) {
     // "进去处理" a waiting session: stop its blink now, and force a fresh rescan so the real
     // state (busy/idle once you've answered, or still waiting if the prompt's up) lands fast
     // instead of waiting out the 10s cached poll.
-    if (effectiveState(s, visible, fetchedAt) === 'waiting') {
+    if (shownState(s) === 'waiting') {
       markActed(sessKey(s))
       refresh()
     }
@@ -102,76 +117,81 @@ export function Overview({ onOpen }: { onOpen: (p: OpenPayload) => void }) {
     else groups.push({ ip: s.node_ip, rows: [s] })
   }
 
-  const total = roster?.sessions?.length ?? 0
+  const filtered = !!(filter || stFilter)
+  const clearFilters = () => {
+    setFilter('')
+    setStFilter('')
+  }
 
   return (
     // One page-level scroll: the KPI strip and chips scroll away with the content, so on mobile
     // the whole area is swipeable (not just the inner panel). Nothing is pinned at the top.
     <div className="h-full w-full overflow-y-auto">
       <div className="flex w-full flex-col gap-3 p-4">
-      {/* KPI strip — the dashboard headline numbers, full-width flat tiles */}
-      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-        <KpiTile label="总会话" value={total} />
-        <KpiTile label="需回复" value={stateCounts.waiting || 0} tone={stateCounts.waiting ? 'waiting' : undefined} />
-        <KpiTile label="运行中" value={stateCounts.busy || 0} tone={stateCounts.busy ? 'busy' : undefined} />
-        <KpiTile label="机器" value={nodeIps.length} />
-      </div>
-
-      {/* machine filter chips */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        <Chip active={filter === ''} onClick={() => setFilter('')} label="全部" count={roster?.sessions?.length} />
-        {nodeIps.map((ip) => (
-          <Chip
-            key={ip}
-            active={filter === ip}
-            onClick={() => setFilter(ip)}
-            label={nodeName(ip, nodes, labels)}
-            count={counts[ip] || 0}
-            dot={nodes[ip]?.color}
-          />
-        ))}
-      </div>
-
-      <div className="bg-card flex flex-col rounded-xl border">
-        <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
-          <h2 className="text-sm font-semibold">kore sessions</h2>
-          <span className="text-muted-foreground text-xs">{roster?.sessions?.length ?? 0} 个</span>
-          {(['busy', 'waiting'] as const).map((st) =>
-            stateCounts[st] ? (
-              <span key={st} className="flex items-center gap-1 text-xs">
-                <StatusDot state={st} />
-                <span className="text-muted-foreground">
-                  {STATE_LABEL[st]} {stateCounts[st]}
-                </span>
-              </span>
-            ) : null,
-          )}
-          <div className="ml-auto flex items-center gap-1.5">
-            <Button variant="outline" size="sm" onClick={refresh} disabled={refreshing}>
-              <RefreshCw className={cn(refreshing && 'animate-spin')} />
-              刷新
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => setJoinOpen(true)}>
-              <Server />
-              添加机器
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => setAdoptOpen(true)}>
-              已有 session
-            </Button>
-            <Button size="sm" onClick={() => setNewOpen(true)}>
-              <Plus />
-              新建
-            </Button>
-          </div>
+        {/* KPI strip — the headline numbers; each tile is also the state filter (click again = all) */}
+        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+          <KpiTile label="全部 session" value={all.length} active={!stFilter} onClick={() => setStFilter('')} />
+          {ST_TILES.map((t) => (
+            <KpiTile
+              key={t.st}
+              label={t.label}
+              value={stateCounts[t.st] || 0}
+              tone={stateCounts[t.st] ? t.tone : undefined}
+              active={stFilter === t.st}
+              onClick={() => setStFilter(stFilter === t.st ? '' : t.st)}
+            />
+          ))}
         </div>
 
-        <div>
+        {/* machine filter chips, then the add-machine entry at the end of the same row */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Chip active={filter === ''} onClick={() => setFilter('')} label="所有机器" />
+          {nodeIps.map((ip) => (
+            <Chip
+              key={ip}
+              active={filter === ip}
+              onClick={() => setFilter(filter === ip ? '' : ip)}
+              label={nodeName(ip, nodes, labels)}
+              count={counts[ip] || 0}
+              dot={nodes[ip]?.color}
+            />
+          ))}
+          <button
+            onClick={() => setUi({ addMachine: true })}
+            className="text-muted-foreground hover:text-foreground hover:bg-accent flex items-center gap-1 rounded-full px-2.5 py-1 text-xs transition-colors"
+          >
+            <Plus className="size-3.5" />
+            添加机器
+          </button>
+        </div>
+
+        <div className="bg-card flex flex-col rounded-xl border">
+          <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
+            <h2 className="text-sm font-semibold">Sessions</h2>
+            {filtered && (
+              <button
+                onClick={clearFilters}
+                className="text-muted-foreground hover:text-foreground bg-muted flex items-center gap-1 rounded-full py-0.5 pr-1.5 pl-2 text-xs"
+              >
+                {[stFilter && STATE_LABEL[stFilter], filter && nodeName(filter, nodes, labels)].filter(Boolean).join(' · ')}
+                <span className="tabular-nums">{rows.length}</span>
+                <X className="size-3" />
+              </button>
+            )}
+            <div className="ml-auto flex items-center gap-1.5">
+              <Hint label="立即刷新">
+                <Button variant="ghost" size="icon" className="size-8" onClick={refresh} disabled={refreshing} aria-label="刷新">
+                  <RefreshCw className={cn(refreshing && 'animate-spin')} />
+                </Button>
+              </Hint>
+              <NewButton />
+            </div>
+          </div>
+
           <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-2.5 p-3">
-            {loading && <div className="text-muted-foreground col-span-full p-8 text-center text-sm">加载中…</div>}
+            {loading && !roster && <SkeletonCards />}
             {error && (
-              <div className="text-bad col-span-full m-2 rounded-md bg-[var(--bad-bg,transparent)] px-3 py-2 text-xs">
-                {error}
-              </div>
+              <div className="text-bad bg-bad-bg col-span-full m-2 rounded-md px-3 py-2 text-xs">{error}</div>
             )}
             {!loading &&
               groups.map((g) => (
@@ -179,6 +199,7 @@ export function Overview({ onOpen }: { onOpen: (p: OpenPayload) => void }) {
                   <div className="col-span-full">
                     <GroupHeader
                       self={!!nodes[g.ip]?.self}
+                      color={nodes[g.ip]?.color}
                       name={nodeName(g.ip, nodes, labels)}
                       host={(nodes[g.ip]?.hostname || '').split('.')[0]}
                       ip={g.ip}
@@ -187,7 +208,7 @@ export function Overview({ onOpen }: { onOpen: (p: OpenPayload) => void }) {
                       board={roster?.version}
                       count={counts[g.ip] || 0}
                       onRename={() =>
-                        setRename({ kind: 'node', key: g.ip, current: labels.nodes[g.ip]?.name || '', placeholder: g.ip })
+                        setUi({ rename: { kind: 'node', key: g.ip, current: labels.nodes[g.ip]?.name || '', placeholder: g.ip } })
                       }
                     />
                   </div>
@@ -195,7 +216,7 @@ export function Overview({ onOpen }: { onOpen: (p: OpenPayload) => void }) {
                     <SessionCard
                       key={sessKey(s)}
                       s={s}
-                      displayState={effectiveState(s, visible, fetchedAt)}
+                      displayState={shownState(s)}
                       labels={labels}
                       prefix={prefix}
                       starred={stars.has(sessKey(s))}
@@ -203,46 +224,129 @@ export function Overview({ onOpen }: { onOpen: (p: OpenPayload) => void }) {
                       onOpen={openSession}
                       onChanged={refresh}
                       onRename={() =>
-                        setRename({
-                          kind: 'session',
-                          key: s.node_ip + '/' + s.name,
-                          current: labels.sessions[s.node_ip + '/' + s.name]?.name || '',
-                          placeholder: s.name,
+                        setUi({
+                          rename: {
+                            kind: 'session',
+                            key: s.node_ip + '/' + s.name,
+                            current: labels.sessions[s.node_ip + '/' + s.name]?.name || '',
+                            placeholder: s.name,
+                          },
                         })
                       }
                     />
                   ))}
                 </div>
               ))}
-            {!loading && !error && rows.length === 0 && (
-              <div className="text-muted-foreground col-span-full p-8 text-center text-sm">没有会话</div>
-            )}
+            {!loading && !error && rows.length === 0 && (filtered && all.length ? <NoMatch onClear={clearFilters} /> : <EmptyState />)}
           </div>
         </div>
       </div>
-      </div>
-      <NewSessionDialog open={newOpen} onOpenChange={setNewOpen} roster={roster} onCreated={refresh} />
-      <AddMachineDialog open={joinOpen} onOpenChange={setJoinOpen} />
-      <AdoptDialog open={adoptOpen} onOpenChange={setAdoptOpen} roster={roster} onAdopted={refresh} />
-      <RenameDialog target={rename} onOpenChange={(v) => !v && setRename(null)} onSaved={refresh} />
+      <NewSessionDialog open={ui.newSession} onOpenChange={(v) => setUi({ newSession: v })} roster={roster} />
+      <AddMachineDialog open={ui.addMachine} onOpenChange={(v) => setUi({ addMachine: v })} />
+      <AdoptDialog open={ui.adopt} onOpenChange={(v) => setUi({ adopt: v })} roster={roster} onAdopted={refresh} />
+      <RenameDialog target={ui.rename} onOpenChange={(v) => !v && setUi({ rename: null })} onSaved={refresh} />
     </div>
   )
 }
 
-function KpiTile({ label, value, tone }: { label: string; value: number; tone?: 'waiting' | 'busy' }) {
+// The primary action, with the less common "adopt an existing tmux session" folded under it.
+function NewButton() {
   return (
-    <div className="bg-card flex flex-col gap-1 rounded-xl border px-4 py-3">
-      <span
-        className={cn(
-          'text-2xl leading-none font-semibold tabular-nums',
-          tone === 'waiting' && 'text-[var(--waiting)]',
-          tone === 'busy' && 'text-[var(--busy)]',
-        )}
-      >
-        {value}
-      </span>
-      <span className="text-muted-foreground text-xs">{label}</span>
+    <div className="flex items-center">
+      <Button size="sm" className="rounded-r-none" onClick={() => setUi({ newSession: true })}>
+        <Plus />
+        新建 session
+      </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button size="sm" className="border-primary-foreground/20 rounded-l-none border-l px-1.5" aria-label="更多新建方式">
+            <ChevronDown />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={() => setUi({ newSession: true })}>
+            <Plus /> 新建 session
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => setUi({ adopt: true })}>
+            <Import /> 接管已有 tmux session…
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
+  )
+}
+
+// Fixed-height placeholders while the first roster loads, so the grid doesn't jump.
+function SkeletonCards() {
+  return (
+    <>
+      {Array.from({ length: 6 }, (_, i) => (
+        <div key={i} className="bg-muted/60 h-[128px] animate-pulse rounded-lg" />
+      ))}
+    </>
+  )
+}
+
+// First run / no sessions anywhere: the three ways to get one, right here.
+function EmptyState() {
+  return (
+    <div className="col-span-full flex flex-col items-center gap-3 px-4 py-12 text-center">
+      <TerminalSquare className="text-muted-foreground size-8" />
+      <div className="flex flex-col gap-1">
+        <div className="text-sm font-medium">还没有 session</div>
+        <div className="text-muted-foreground text-xs">新建一个，或把机器上已有的 tmux session 纳入管理。</div>
+      </div>
+      <div className="flex flex-wrap justify-center gap-2">
+        <Button size="sm" onClick={() => setUi({ newSession: true })}>
+          <Plus /> 新建 session
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => setUi({ adopt: true })}>
+          <Import /> 接管已有 session
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => setUi({ addMachine: true })}>
+          <Server /> 添加机器
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function NoMatch({ onClear }: { onClear: () => void }) {
+  return (
+    <div className="text-muted-foreground col-span-full flex flex-col items-center gap-2 p-8 text-sm">
+      没有符合筛选的 session
+      <Button variant="outline" size="sm" onClick={onClear}>
+        清除筛选
+      </Button>
+    </div>
+  )
+}
+
+function KpiTile({
+  label,
+  value,
+  tone,
+  active,
+  onClick,
+}: {
+  label: string
+  value: number
+  tone?: string
+  active: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        'bg-card flex flex-col gap-1 rounded-xl border px-4 py-3 text-left transition-colors',
+        active ? 'border-ring' : 'hover:bg-accent/40',
+      )}
+    >
+      <span className={cn('text-2xl leading-none font-semibold tabular-nums', tone)}>{value}</span>
+      <span className="text-muted-foreground text-xs">{label}</span>
+    </button>
   )
 }
 
@@ -262,6 +366,7 @@ function Chip({
   return (
     <button
       onClick={onClick}
+      aria-pressed={active}
       className={cn(
         'flex items-center gap-1.5 rounded-full px-3 py-1 text-xs transition-colors',
         active ? 'bg-card text-foreground border' : 'text-muted-foreground hover:text-foreground hover:bg-accent',
@@ -274,78 +379,113 @@ function Chip({
   )
 }
 
-function pctTone(pct: number): string {
-  return pct >= 90 ? 'text-[var(--bad)]' : pct >= 75 ? 'text-[var(--busy)]' : ''
+// ---- per-machine health ---------------------------------------------------------------------
+
+type Level = 0 | 1 | 2 // ok / warn / bad
+const pctLevel = (pct: number): Level => (pct >= 90 ? 2 : pct >= 75 ? 1 : 0)
+const loadLevel = (ratio: number): Level => (ratio >= 1.5 ? 2 : ratio >= 1 ? 1 : 0)
+const LEVEL_TEXT = ['', 'text-warn', 'text-bad'] as const
+
+interface Health {
+  items: Array<{ label: string; value: string; sub?: string; level: Level }>
+  level: Level
 }
 
-function Metric({ label, children }: { label: string; children: React.ReactNode }) {
+function health(sys?: NodeMetrics): Health | null {
+  if (!sys) return null
+  const items: Health['items'] = []
+  if (sys.load1 != null) {
+    const ratio = sys.cpus ? sys.load1 / sys.cpus : 0
+    items.push({ label: '负载', value: sys.load1.toFixed(1), sub: sys.cpus ? '/' + sys.cpus : undefined, level: loadLevel(ratio) })
+  }
+  if (sys.mem_total_kb) {
+    const pct = Math.round((100 * (sys.mem_total_kb - (sys.mem_avail_kb ?? 0))) / sys.mem_total_kb)
+    items.push({ label: '内存', value: pct + '%', level: pctLevel(pct) })
+  }
+  if (sys.disk_total_kb) {
+    const pct = Math.round((100 * (sys.disk_used_kb ?? 0)) / sys.disk_total_kb)
+    items.push({ label: '磁盘', value: pct + '%', level: pctLevel(pct) })
+  }
+  const gpus = sys.gpus ?? []
+  if (gpus.length) {
+    const avg = Math.round(gpus.reduce((a, g) => a + g.util, 0) / gpus.length)
+    items.push({ label: 'GPU', value: avg + '%', sub: `×${gpus.length}`, level: pctLevel(avg) })
+  }
+  if (!items.length) return null
+  return { items, level: Math.max(...items.map((i) => i.level)) as Level }
+}
+
+function Metric({ item }: { item: Health['items'][number] }) {
   return (
     <span className="bg-muted/70 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px]">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="tabular-nums">{children}</span>
+      <span className="text-muted-foreground">{item.label}</span>
+      <span className="tabular-nums">
+        <span className={LEVEL_TEXT[item.level]}>{item.value}</span>
+        {item.sub && <span className="text-muted-foreground">{item.sub}</span>}
+      </span>
     </span>
   )
 }
 
-// Compact per-machine metrics in the group header: load / mem / disk / gpu. Tinted blocks, no
-// one-sided edges ([[kore-ui-no-one-sided-edges]]); value turns amber/red as usage climbs.
-// Hidden on narrow screens — the header stays readable on mobile.
-function SysStrip({ sys, board, self }: { sys?: NodeMetrics; board?: string; self?: boolean }) {
-  if (!sys) return null
-  const gpus = sys.gpus ?? []
-  // Version chip is for CLIENT consistency; the board's own version lives in the top bar, and
-  // its PATH `kore` can differ from the running build — so don't show/flag it on the self node.
-  const ver = self ? undefined : sys.kore_version
-  const stale = versionLt(ver, board)
-  const has = sys.load1 != null || sys.mem_total_kb || sys.disk_total_kb || gpus.length || ver
-  if (!has) return null
-  const memPct =
-    sys.mem_total_kb ? Math.round((100 * (sys.mem_total_kb - (sys.mem_avail_kb ?? 0))) / sys.mem_total_kb) : null
-  const diskPct = sys.disk_total_kb ? Math.round((100 * (sys.disk_used_kb ?? 0)) / sys.disk_total_kb) : null
-  const gpuAvg = gpus.length ? Math.round(gpus.reduce((a, g) => a + g.util, 0) / gpus.length) : null
-  const loadRatio = sys.load1 != null && sys.cpus ? sys.load1 / sys.cpus : null
-  const loadTone = loadRatio == null ? '' : loadRatio >= 1.5 ? 'text-[var(--bad)]' : loadRatio >= 1 ? 'text-[var(--busy)]' : ''
+// Machine metrics in the group header. Wide screens: the full load / mem / disk / gpu strip
+// (values turn amber/red as usage climbs). Narrow screens: one health dot that opens the same
+// numbers in a popover — and once anything crosses a threshold it says so in words.
+// Tinted blocks, no one-sided edges ([[kore-ui-no-one-sided-edges]]).
+function SysStrip({ sys }: { sys?: NodeMetrics }) {
+  const h = health(sys)
+  if (!h) return null
+  const dot = ['var(--ok)', 'var(--warn)', 'var(--bad)'][h.level]
   return (
-    <div className="hidden shrink-0 items-center gap-1 lg:flex">
-      {sys.load1 != null && (
-        <Metric label="负载">
-          <span className={loadTone}>{sys.load1.toFixed(1)}</span>
-          {sys.cpus ? <span className="text-muted-foreground">/{sys.cpus}</span> : null}
-        </Metric>
+    <>
+      <div className="hidden shrink-0 items-center gap-1 lg:flex">
+        {h.items.map((it) => (
+          <Metric key={it.label} item={it} />
+        ))}
+      </div>
+      <Popover>
+        <PopoverTrigger asChild>
+          <button
+            aria-label="机器资源"
+            className="hover:bg-accent flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-[11px] lg:hidden"
+          >
+            <span className="size-2 rounded-full" style={{ background: dot }} />
+            {h.level > 0 && <span className={LEVEL_TEXT[h.level]}>{h.level === 2 ? '资源告急' : '资源偏高'}</span>}
+          </button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-auto">
+          <div className="flex flex-wrap gap-1">
+            {h.items.map((it) => (
+              <Metric key={it.label} item={it} />
+            ))}
+          </div>
+        </PopoverContent>
+      </Popover>
+    </>
+  )
+}
+
+// Client build vs the board's. The board's own version lives in the top bar, and its PATH `kore`
+// can differ from the running build — so it isn't shown/flagged on the self node.
+function VersionChip({ ver, board }: { ver?: string; board?: string }) {
+  if (!ver) return null
+  const stale = versionLt(ver, board)
+  return (
+    <span
+      title={stale ? `版本落后，建议升级到 ${board}` : undefined}
+      className={cn(
+        'hidden shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] tabular-nums sm:inline-flex',
+        stale ? 'bg-warn-bg text-warn' : 'bg-muted/70 text-muted-foreground',
       )}
-      {memPct != null && (
-        <Metric label="内存">
-          <span className={pctTone(memPct)}>{memPct}%</span>
-        </Metric>
-      )}
-      {diskPct != null && (
-        <Metric label="磁盘">
-          <span className={pctTone(diskPct)}>{diskPct}%</span>
-        </Metric>
-      )}
-      {gpuAvg != null && (
-        <Metric label="GPU">
-          {gpus.length}·<span className={pctTone(gpuAvg)}>{gpuAvg}%</span>
-        </Metric>
-      )}
-      {ver && (
-        <span
-          title={stale ? `版本落后，建议升级到 ${board}` : undefined}
-          className={cn(
-            'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] tabular-nums',
-            stale ? 'bg-busy-bg text-[var(--busy)]' : 'bg-muted/70 text-muted-foreground',
-          )}
-        >
-          {ver.startsWith('v') ? ver : 'v' + ver}
-          {stale && <span>·旧</span>}
-        </span>
-      )}
-    </div>
+    >
+      {ver.startsWith('v') ? ver : 'v' + ver}
+      {stale && <span>·旧</span>}
+    </span>
   )
 }
 
 function GroupHeader({
   self,
+  color,
   name,
   host,
   ip,
@@ -356,6 +496,7 @@ function GroupHeader({
   onRename,
 }: {
   self: boolean
+  color?: string
   name: string
   host: string
   ip: string
@@ -367,25 +508,30 @@ function GroupHeader({
 }) {
   return (
     <div className="text-muted-foreground bg-card sticky top-0 z-[1] flex items-center gap-2 overflow-hidden px-4 pt-3.5 pb-1.5 text-[12px]">
-      <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[11px] font-semibold', self ? 'bg-[var(--claude)] text-white' : 'bg-[var(--idle)] text-white')}>
+      {/* tinted role chip in the machine's colour, foreground text — legible in both themes */}
+      <span
+        className="text-foreground shrink-0 rounded px-1.5 py-0.5 text-[11px] font-semibold"
+        style={{ background: `color-mix(in srgb, ${color || 'var(--muted-foreground)'} 22%, transparent)` }}
+      >
         {self ? 'server' : 'client'}
       </span>
-      <button onClick={onRename} title="改机器备注名" className="text-foreground hover:bg-accent shrink-0 rounded px-1 font-semibold whitespace-nowrap">{name}</button>
+      <button onClick={onRename} title="改机器备注名" className="text-foreground hover:bg-accent shrink-0 rounded px-1 font-semibold whitespace-nowrap">
+        {name}
+      </button>
       {host && <span className="hidden min-w-0 truncate sm:inline">{host}</span>}
       <span className="hidden shrink-0 font-mono sm:inline">{ip}</span>
-      <SysStrip sys={sys} board={board} self={self} />
+      <SysStrip sys={sys} />
+      {!self && <VersionChip ver={sys?.kore_version} board={board} />}
       <span className="ml-auto shrink-0 tabular-nums">{count} 个</span>
       <NodeActions self={self} ip={ip} agentStarted={agentStarted} />
     </div>
   )
 }
 
-// A two-step (arm → confirm) lifecycle button. The server builds the command; we only name the
-// target. The node drops offline briefly as its agent/board is replaced — the roster poll shows
-// it come back, so we don't block on the (possibly dropped) response.
-// A privileged lifecycle action behind an EXPLICIT confirm: the icon button opens a small
-// popover that spells out the consequence and offers 取消 / 确认 — never a one-click trigger.
-function ConfirmAction({
+// A privileged lifecycle action: an icon button that opens the shared ConfirmPopover. The server
+// builds the command; we only name the target. The node drops offline briefly as its agent/board
+// is replaced — the roster poll shows it come back, so we don't block on the response.
+function NodeAction({
   icon: Icon,
   title,
   desc,
@@ -402,48 +548,26 @@ function ConfirmAction({
   run: () => Promise<unknown>
   onFired?: () => void
 }) {
-  const [open, setOpen] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const go = async () => {
-    setBusy(true)
-    try {
-      await run()
-      onFired?.()
-      toast(toastMsg, { description: '节点会短暂掉线重连，稍候自动恢复' })
-      setOpen(false)
-    } catch (err) {
-      toast.error('操作失败', { description: (err as Error).message })
-    } finally {
-      setBusy(false)
-    }
-  }
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          title={title}
-          aria-label={title}
-          onClick={(e) => e.stopPropagation()}
-          className="text-muted-foreground hover:bg-accent hover:text-foreground flex shrink-0 items-center rounded px-1 py-0.5 transition-colors"
-        >
-          <Icon className="size-3.5" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-64" onClick={(e) => e.stopPropagation()}>
-        <div className="flex flex-col gap-2">
-          <div className="text-sm font-medium">{title}</div>
-          <p className="text-muted-foreground text-xs leading-relaxed">{desc}</p>
-          <div className="flex justify-end gap-1.5">
-            <Button variant="ghost" size="sm" className="h-7" onClick={() => setOpen(false)} disabled={busy}>
-              取消
-            </Button>
-            <Button variant="destructive" size="sm" className="h-7" onClick={go} disabled={busy}>
-              {busy ? '执行中…' : confirmLabel}
-            </Button>
-          </div>
-        </div>
-      </PopoverContent>
-    </Popover>
+    <ConfirmPopover
+      hint={title}
+      title={title}
+      desc={desc}
+      confirmLabel={confirmLabel}
+      run={async () => {
+        await run()
+        onFired?.()
+        toast(toastMsg, { description: '这台机器会短暂掉线重连，稍候自动恢复' })
+      }}
+    >
+      <button
+        aria-label={title}
+        onClick={(e) => e.stopPropagation()}
+        className="text-muted-foreground hover:bg-accent hover:text-foreground data-[state=open]:bg-accent flex shrink-0 items-center rounded px-1 py-0.5 transition-colors"
+      >
+        <Icon className="size-3.5" />
+      </button>
+    </ConfirmPopover>
   )
 }
 
@@ -500,34 +624,34 @@ function NodeActions({ self, ip, agentStarted }: { self: boolean; ip: string; ag
   return (
     <div className="flex shrink-0 items-center gap-1">
       {phase === 'watching' && (
-        <span className="flex items-center gap-1 text-[11px] text-[var(--busy)]">
+        <span className="text-warn flex items-center gap-1 text-[11px]">
           <RotateCw className="size-3 animate-spin" />
           重启中…
         </span>
       )}
-      {phase === 'done' && <span className="text-[11px] font-medium text-[var(--ok)]">已重启 ✓</span>}
+      {phase === 'done' && <span className="text-ok text-[11px] font-medium">已重启 ✓</span>}
       {phase === 'sent' && <span className="text-muted-foreground text-[11px]">已下发</span>}
       {!self && (
-        <ConfirmAction
+        <NodeAction
           icon={RotateCw}
           title="重启 agent"
-          desc="重启这台机器的 kore agent。它会短暂掉线并自动重连；正在运行的 tmux / Claude 会话不受影响。"
+          desc="重启这台机器的 kore agent。它会短暂掉线并自动重连；正在运行的 tmux / Claude session 不受影响。"
           confirmLabel="重启"
           toastMsg="正在重启 agent"
           run={() => kNode('node', 'restart', { node_ip: ip })}
           onFired={startWatch}
         />
       )}
-      <ConfirmAction
+      <NodeAction
         icon={CircleFadingArrowUp}
-        title={self ? '升级并重启 server' : '升级并重启该机器'}
+        title={self ? '升级并重启 server' : '升级并重启该 client'}
         desc={
           self
-            ? '拉取最新 kore 代码并重启本机板子。看板会短暂断开并自动重连；tmux / Claude 会话不受影响。'
-            : '在这台机器上拉取最新 kore 代码并重启其 agent。期间它短暂掉线自动重连；tmux / Claude 会话不受影响。'
+            ? '拉取最新 kore 代码并重启本机板子。看板会短暂断开并自动重连；tmux / Claude session 不受影响。'
+            : '在这台机器上拉取最新 kore 代码并重启其 agent。期间它短暂掉线自动重连；tmux / Claude session 不受影响。'
         }
         confirmLabel="升级并重启"
-        toastMsg={self ? '正在升级并重启 server' : '正在升级并重启该机器'}
+        toastMsg={self ? '正在升级并重启 server' : '正在升级并重启该 client'}
         run={() => (self ? kNode('server', 'upgrade') : kNode('node', 'upgrade', { node_ip: ip }))}
         onFired={self ? undefined : startWatch}
       />

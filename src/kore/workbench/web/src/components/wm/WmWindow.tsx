@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { ChevronDown, Columns2, RotateCw, Rows2, SquareSplitHorizontal, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { ChevronDown, Columns2, LayoutPanelLeft, RotateCw, Rows2, X } from 'lucide-react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { TerminalView } from '@/components/terminal/TerminalView'
 import { BrowserView } from './BrowserView'
@@ -7,6 +7,7 @@ import { FilesView } from './FilesView'
 import { Launcher } from './Launcher'
 import { QuickSwitch } from './QuickSwitch'
 import { WindowSwitcher } from './WindowSwitcher'
+import { ShareMenu } from './ShareMenu'
 import { PaneGrid } from './PaneGrid'
 import { TmuxStatusBar } from './TmuxStatusBar'
 import { Hint } from '@/components/Hint'
@@ -62,6 +63,7 @@ export function WmWindow({ rect, active, mobile = false }: { rect: Rect; active:
         {isTerm && !isEmpty && (
           <WindowSwitcher nodeIp={win.state.node_ip} name={win.state.name} winId={rect.win} current={win.state.window} currentPane={win.state.pane} />
         )}
+        {isTerm && !isEmpty && <ShareMenu nodeIp={win.state.node_ip} name={win.state.name} />}
         {isTerm && !isEmpty && (
           <Hint label="重连">
             <button
@@ -73,35 +75,7 @@ export function WmWindow({ rect, active, mobile = false }: { rect: Rect; active:
             </button>
           </Hint>
         )}
-        {/* split: hover the button to float out the two directions — no click needed. The
-            wrapper's `pt-1` bridges the gap to the button so the hover never drops. */}
-        <div className="group/split relative">
-          <button
-            className="text-muted-foreground group-hover/split:bg-foreground/10 group-hover/split:text-foreground flex size-6 items-center justify-center rounded-lg transition-colors"
-            aria-label="分屏"
-            title="分屏"
-          >
-            <SquareSplitHorizontal className="size-4" />
-          </button>
-          <div className="invisible absolute top-full right-0 z-20 -translate-y-1 pt-1 opacity-0 transition-[opacity,transform] duration-150 group-hover/split:visible group-hover/split:translate-y-0 group-hover/split:opacity-100">
-            <div className="bg-popover ring-foreground/10 flex flex-col gap-0.5 rounded-lg p-1 shadow-md ring-1">
-              <button
-                disabled={!canRow}
-                onClick={() => wmStore.split(rect.win, 'row')}
-                className="hover:bg-accent flex items-center gap-1.5 rounded-md px-2 py-1 text-sm whitespace-nowrap disabled:pointer-events-none disabled:opacity-50"
-              >
-                <Columns2 className="size-4" /> 左右分屏
-              </button>
-              <button
-                disabled={!canCol}
-                onClick={() => wmStore.split(rect.win, 'col')}
-                className="hover:bg-accent flex items-center gap-1.5 rounded-md px-2 py-1 text-sm whitespace-nowrap disabled:pointer-events-none disabled:opacity-50"
-              >
-                <Rows2 className="size-4" /> 上下分屏
-              </button>
-            </div>
-          </div>
-        </div>
+        <SplitMenu winId={rect.win} canRow={canRow} canCol={canCol} />
         <button
           onClick={() => wmStore.close(rect.win)}
           className="text-muted-foreground hover:bg-[var(--bad-bg)] hover:text-[var(--bad)] flex size-6 items-center justify-center rounded-lg transition-colors"
@@ -147,6 +121,89 @@ export function WmWindow({ rect, active, mobile = false }: { rect: Rect; active:
         ) : (
           <FilesView winId={rect.win} nodeIp={win.state.node_ip} root={win.state.root} path={win.state.path} nodeName={win.state.nodeName} mobile={mobile} />
         )}
+      </div>
+    </div>
+  )
+}
+
+// Side-by-side ("并排") a new dashboard window next to this one — a web-layout split, distinct from
+// a tmux pane split (分屏). Opens on hover (mouse) AND on click / Enter (keyboard, touch); closes on
+// pick, outside press, Esc or pointer leave. The wrapper's `pt-1` bridges the gap so hover holds.
+function SplitMenu({ winId, canRow, canCol }: { winId: string; canRow: boolean; canCol: boolean }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const leaveT = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // hover already opened it → the click that follows must not toggle it shut
+  const byHover = useRef(false)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: PointerEvent) => !ref.current?.contains(e.target as Node) && setOpen(false)
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false)
+    document.addEventListener('pointerdown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const pick = (dir: 'row' | 'col') => {
+    setOpen(false)
+    wmStore.split(winId, dir)
+  }
+  const item = 'hover:bg-accent focus-visible:bg-accent flex items-center gap-1.5 rounded-md px-2 py-1 text-sm whitespace-nowrap outline-none disabled:pointer-events-none disabled:opacity-50'
+
+  return (
+    <div
+      ref={ref}
+      className="relative"
+      onPointerEnter={(e) => {
+        if (e.pointerType !== 'mouse') return
+        if (leaveT.current) clearTimeout(leaveT.current)
+        if (!open) byHover.current = true
+        setOpen(true)
+      }}
+      onPointerLeave={(e) => {
+        if (e.pointerType !== 'mouse') return
+        leaveT.current = setTimeout(() => {
+          byHover.current = false
+          setOpen(false)
+        }, 120)
+      }}
+    >
+      {/* no hover hint: hovering already opens the self-labelled menu */}
+      <button
+        onClick={() => {
+          const keep = byHover.current
+          byHover.current = false
+          setOpen((v) => keep || !v)
+        }}
+        aria-label="并排窗口"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={cn(
+          'text-muted-foreground hover:bg-foreground/10 hover:text-foreground flex size-6 items-center justify-center rounded-lg transition-colors',
+          open && 'bg-foreground/10 text-foreground',
+        )}
+      >
+        <LayoutPanelLeft className="size-4" />
+      </button>
+      <div
+        role="menu"
+        className={cn(
+          'absolute top-full right-0 z-20 pt-1 transition-[opacity,transform] duration-150',
+          open ? 'visible translate-y-0 opacity-100' : 'invisible -translate-y-1 opacity-0',
+        )}
+      >
+        <div className="bg-popover ring-foreground/10 flex flex-col gap-0.5 rounded-lg p-1 shadow-md ring-1">
+          <button role="menuitem" disabled={!canRow} onClick={() => pick('row')} className={item}>
+            <Columns2 className="size-4" /> 左右并排
+          </button>
+          <button role="menuitem" disabled={!canCol} onClick={() => pick('col')} className={item}>
+            <Rows2 className="size-4" /> 上下并排
+          </button>
+        </div>
       </div>
     </div>
   )

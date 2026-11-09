@@ -47,6 +47,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 PKG = os.path.dirname(os.path.abspath(__file__))
@@ -75,19 +76,34 @@ _ORIG_PROXY = {v: os.environ[v] for v in _PROXY_VARS if v in os.environ}
 # State lands under ~/.kore. KORE_STATE_HOME overrides the location.
 STATE_HOME = os.path.expanduser(
     os.environ.get("KORE_STATE_HOME") or "~/.kore")
+# Host-local runtime state: hot, short-lived files that must never sit on shared storage. An
+# NFS/GPFS home can stall a single open() or fsync() for minutes; the agent registry is
+# rewritten by every client heartbeat and read on every remote command, so on NFS one stall
+# drops every client offline and freezes every remote pane. The registry is TTL-ephemeral
+# (clients re-register every ~15s), so local /tmp loses nothing. KORE_RUNTIME_DIR overrides.
+RUNTIME_DIR = os.environ.get("KORE_RUNTIME_DIR") or os.path.join(
+    tempfile.gettempdir(), f"kore-{os.getuid()}")
 # Where `kore server` records the background dashboard so `down`/`status` can find it.
 # Per-host file names: ~/.kore often lives on shared storage (an NFS/GPFS home seen by
 # every machine), so a pid recorded on one host must never be signalled from another.
 HOST = (socket.gethostname() or "host").split(".")[0]
-PIDFILE = os.path.join(STATE_HOME, f"server-{HOST}.pid")
-RUNFILE = os.path.join(STATE_HOME, f"server-{HOST}.run")   # live board config, "k=v"
-LOGFILE = os.path.join(STATE_HOME, f"server-{HOST}.log")
+# These are hot or host-bound, so they live in RUNTIME_DIR (host-local), not on a shared
+# home: the log is appended per request, the pid only means something on this host. Only
+# durable, rarely-written state (tokens, labels, config, the session registry) stays in
+# STATE_HOME. The STATE_HOME copies of pid/run are still READ, so a board started by an
+# older kore can be found, restarted and stopped.
+PIDFILE = os.path.join(RUNTIME_DIR, f"server-{HOST}.pid")
+RUNFILE = os.path.join(RUNTIME_DIR, f"server-{HOST}.run")   # live board config, "k=v"
+LOGFILE = os.path.join(RUNTIME_DIR, f"server-{HOST}.log")
+OLD_PIDFILE = os.path.join(STATE_HOME, f"server-{HOST}.pid")   # kore <= 0.5.6
+OLD_RUNFILE = os.path.join(STATE_HOME, f"server-{HOST}.run")
 LEGACY_PIDFILE = os.path.join(STATE_HOME, "kore.pid")      # written by kore <= 0.3.5
 # `kore client` runs the agent in the background too.
-CLIENT_PIDFILE = os.path.join(STATE_HOME, f"client-{HOST}.pid")
-CLIENT_RUNFILE = os.path.join(STATE_HOME, f"client-{HOST}.run")
-CLIENT_LOGFILE = os.path.join(STATE_HOME, f"client-{HOST}.log")
-CLIENT_STATUS = os.path.join(STATE_HOME, f"client-{HOST}.status")   # written by the agent
+CLIENT_PIDFILE = os.path.join(RUNTIME_DIR, f"client-{HOST}.pid")
+CLIENT_RUNFILE = os.path.join(RUNTIME_DIR, f"client-{HOST}.run")
+CLIENT_LOGFILE = os.path.join(RUNTIME_DIR, f"client-{HOST}.log")
+CLIENT_STATUS = os.path.join(RUNTIME_DIR, f"client-{HOST}.status")   # written by the agent
+OLD_CLIENT_PIDFILE = os.path.join(STATE_HOME, f"client-{HOST}.pid")   # kore <= 0.5.6
 # The agent (client-join) token: minted on first `kore server`, 0600, like the WB token.
 AGENT_TOKEN_FILE = os.path.join(STATE_HOME, "agent.token")
 
@@ -127,12 +143,16 @@ def _apply_env_defaults() -> None:
     """Steer writable state under ~/.kore, proxy hygiene.
 
     setdefault-style throughout: an explicit env value always wins."""
-    os.environ.setdefault("RSI_CCOPS_STATE", os.path.join(STATE_HOME, "ccops"))
+    # agent-state too: its existence is what tells the bridge (kore-bridge _HOOK_STATE_DIR)
+    # to read hook records here instead of the pre-0.5.7 ~/.kore location.
+    os.makedirs(os.path.join(RUNTIME_DIR, "agent-state"), mode=0o700, exist_ok=True)
+    os.environ.setdefault("KORE_RUNTIME_DIR", RUNTIME_DIR)  # children + agent agree on it
+    os.environ.setdefault("RSI_CCOPS_STATE", os.path.join(RUNTIME_DIR, "ccops"))  # ledgers: hot
     os.environ.setdefault("WB_TOKEN_FILE", os.path.join(STATE_HOME, "wb.token"))
     # The entry scripts default these under ~/.kore too, but set them explicitly so every
     # consumer (dashboard, agent, engine, koreops self-relaunch) agrees on one place (and
     # an explicit env value still wins over this).
-    _setdefault_env("AGENTS_FILE", os.path.join(STATE_HOME, "agents.json"))
+    _setdefault_env("AGENTS_FILE", os.path.join(RUNTIME_DIR, "agents.json"))  # local, see RUNTIME_DIR
     _setdefault_env("REGISTRY", os.path.join(STATE_HOME, "sessions.json"))
     _setdefault_env("BRIDGE_PREFIX", "kore-")      # the brand prefix
     # Intranet agents usually must NOT traverse an HTTP proxy (mirrors service.sh).
@@ -207,6 +227,7 @@ def _pidfile_read(path: str, marker: str) -> int:
 
 
 def _pidfile_write(path: str, pid: int) -> None:
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"{pid} {HOST}\n")
 
@@ -214,12 +235,14 @@ def _pidfile_write(path: str, pid: int) -> None:
 def _read_pid() -> int:
     """The pid of the background board on THIS host, or 0."""
     return (_pidfile_read(PIDFILE, "workbench/server.py")
+            or _pidfile_read(OLD_PIDFILE, "workbench/server.py")
             or _pidfile_read(LEGACY_PIDFILE, "workbench/server.py"))
 
 
 def _read_client_pid() -> int:
     """The pid of the background client agent on THIS host, or 0."""
-    return _pidfile_read(CLIENT_PIDFILE, "kore-agent.py")
+    return (_pidfile_read(CLIENT_PIDFILE, "kore-agent.py")
+            or _pidfile_read(OLD_CLIENT_PIDFILE, "kore-agent.py"))
 
 def _health_ok(host: str, port: str, timeout: float = 1.0) -> bool:
     """Is the board answering /api/health? (the one endpoint that needs no token)."""
@@ -268,7 +291,7 @@ def _runfile_read() -> dict:
     """Parse the live board config (`k=v` per line); {} if there is no run file."""
     cfg: dict = {}
     try:
-        with open(RUNFILE, encoding="utf-8") as f:
+        with open(RUNFILE if os.path.exists(RUNFILE) else OLD_RUNFILE, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if "=" in line:
@@ -333,7 +356,7 @@ def _server(rest: list) -> int:
             sys.stdout.write("kore is running; --restart requested, bringing it down "
                              "first...\n")
             _stop_pid(pid)                 # the board only — a client here keeps running
-            _rm(PIDFILE, RUNFILE, LEGACY_PIDFILE)
+            _rm(PIDFILE, RUNFILE, OLD_PIDFILE, OLD_RUNFILE, LEGACY_PIDFILE)
         else:
             prev = _runfile_read()
             desired = {"host": host, "port": port, "prefix": prefix}
@@ -361,9 +384,12 @@ def _server(rest: list) -> int:
     log = open(LOGFILE, "a", encoding="utf-8")
     log.write(f"\n===== kore server {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
     log.flush()
+    # `-I` + a local cwd: kore is stdlib-only, and a PYTHONPATH with an empty entry (":/x")
+    # would otherwise put the caller's cwd — often an NFS project dir — first on sys.path of
+    # the board and every child it spawns (see kore-agent install_hooks for the same trap).
     proc = subprocess.Popen(
-        [sys.executable, os.path.join(PKG, SERVER_PY)],
-        stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+        [sys.executable, "-I", os.path.join(PKG, SERVER_PY)],
+        stdin=subprocess.DEVNULL, stdout=log, stderr=log, cwd=RUNTIME_DIR,
         start_new_session=True, env=os.environ.copy())
     _pidfile_write(PIDFILE, proc.pid)
     _runfile_write(host, port, prefix)
@@ -475,8 +501,8 @@ def _client(rest: list) -> int:
     log.write(f"\n===== kore client {time.strftime('%Y-%m-%d %H:%M:%S')} -> {url} =====\n")
     log.flush()
     proc = subprocess.Popen(
-        [sys.executable, os.path.join(PKG, AGENT_PY), *passthrough],
-        stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+        [sys.executable, "-I", os.path.join(PKG, AGENT_PY), *passthrough],  # -I: see _server
+        stdin=subprocess.DEVNULL, stdout=log, stderr=log, cwd=RUNTIME_DIR,
         start_new_session=True, env=os.environ.copy())
     _pidfile_write(CLIENT_PIDFILE, proc.pid)
     with open(CLIENT_RUNFILE, "w", encoding="utf-8") as f:
@@ -696,7 +722,7 @@ def _stop_client(quiet: bool = False) -> bool:
         _stop_pid(pid)
         if not quiet:
             sys.stdout.write(f"kore client stopped (pid {pid}).\n")
-    _rm(CLIENT_PIDFILE, CLIENT_RUNFILE)
+    _rm(CLIENT_PIDFILE, CLIENT_RUNFILE, OLD_CLIENT_PIDFILE)
     return bool(pid)
 
 
@@ -708,7 +734,7 @@ def _down(_rest: list) -> int:
         _stop_pid(pid)
         sys.stdout.write(f"kore server stopped (pid {pid}).\n")
         stopped = True
-    _rm(PIDFILE, RUNFILE)
+    _rm(PIDFILE, RUNFILE, OLD_PIDFILE, OLD_RUNFILE)
     if pid and os.path.exists(LEGACY_PIDFILE):
         _rm(LEGACY_PIDFILE, os.path.join(STATE_HOME, "kore.run"))
     stopped = _stop_client() or stopped
@@ -841,6 +867,28 @@ def _detect_node_ip() -> str:
             return "127.0.0.1"
 
 
+_NET_FS = {"nfs", "nfs4", "cifs", "smb3", "gpfs", "lustre", "ceph", "glusterfs",
+           "fuse.sshfs", "9p", "afs"}
+
+
+def _fs_type(path: str) -> str:
+    """Filesystem type of the mount holding `path` (longest /proc/mounts prefix), or ''."""
+    try:
+        path = os.path.realpath(path)
+        best, typ = "", ""
+        with open("/proc/mounts", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mnt = parts[1].replace("\\040", " ")
+                if (path == mnt or path.startswith(mnt.rstrip("/") + "/")) and len(mnt) >= len(best):
+                    best, typ = mnt, parts[2]
+        return typ
+    except OSError:
+        return ""
+
+
 def _doctor(_rest: list) -> int:
     rows: list = []   # (level, label, detail)
 
@@ -877,6 +925,19 @@ def _doctor(_rest: list) -> int:
         else:
             add("PASS", "tmux version", tv)
 
+    # Network filesystems: the code and the hot runtime state must be host-local. An NFS/GPFS
+    # mount can stall a single open() for minutes, and kore starts processes from its code
+    # and writes logs/ledgers/hook state per request — on NFS that froze the whole board.
+    for label, path in (("install dir", PKG), ("runtime dir", RUNTIME_DIR)):
+        fs = _fs_type(path)
+        if fs in _NET_FS:
+            add("WARN", f"{label} on local disk",
+                f"{path} is on {fs} — move it to local disk (stalls freeze the board; "
+                + ("set KORE_RUNTIME_DIR" if label == "runtime dir" else "reinstall with KORE_INSTALL_DIR")
+                + ")")
+        else:
+            add("PASS", f"{label} on local disk", f"{path} ({fs or 'unknown'})")
+
     token = _env("AGENT_TOKEN", "")
     if token:
         add("PASS", "agent token", "set (client /exec fenced)")
@@ -886,7 +947,7 @@ def _doctor(_rest: list) -> int:
         add("WARN", "agent token",
             "none yet — `kore server` mints one on first start")
 
-    agents_file = _env("AGENTS_FILE", os.path.join(STATE_HOME, "agents.json"))
+    agents_file = _env("AGENTS_FILE", os.path.join(RUNTIME_DIR, "agents.json"))
     adir = os.path.dirname(agents_file) or "."
     if os.path.isdir(adir) and os.access(adir, os.W_OK):
         add("PASS", "agents dir writable", adir)

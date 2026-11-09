@@ -29,6 +29,7 @@ import shlex
 import signal
 import socket
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -55,16 +56,23 @@ HEARTBEAT_S = float(os.environ.get("KORE_AGENT_HEARTBEAT_S", "15"))
 # passes hist/max_bytes per request; these are only the fallbacks and the pull cadence.
 TAP_PULL_WAIT_S = float(os.environ.get("KORE_AGENT_TAP_WAIT_S", "2.0"))
 
-STATE_DIR = os.path.expanduser(os.environ.get("KORE_STATE_HOME") or "~/.kore")
-# Per-host names: ~/.kore is often on shared storage (NFS/GPFS home), seen by every machine.
+# Everything this agent writes is hot or host-bound, so it lives in the host-LOCAL runtime
+# dir, never in ~/.kore: that is often an NFS/GPFS home, where one open() can stall for
+# minutes — a hook stuck there held up the user's Claude prompt until Claude's hook timeout.
+# Keep the default in sync with cli.RUNTIME_DIR and kore-bridge's _HOOK_STATE_DIR.
+RUNTIME_DIR = os.environ.get("KORE_RUNTIME_DIR") or os.path.join(
+    tempfile.gettempdir(), f"kore-{os.getuid()}")
 _HOST = (socket.gethostname() or "host").split(".")[0]
-PORTFILE = os.path.join(STATE_DIR, f"agent-{_HOST}.port")
+PORTFILE = os.path.join(RUNTIME_DIR, f"agent-{_HOST}.port")
 # Outcome of the latest registration attempt, read by `kore client` / `kore status`.
-STATUSFILE = os.path.join(STATE_DIR, f"client-{_HOST}.status")
+STATUSFILE = os.path.join(RUNTIME_DIR, f"client-{_HOST}.status")
 # Per-session agent-status files, written by the Claude Code hooks (see the hook section
-# below) and read by the server's session_state(). ~/.kore is often shared storage, but a
-# session name is globally unique in kore, so a flat dir keyed by tmux session name is safe.
-AGENT_STATE_DIR = os.path.join(STATE_DIR, "agent-state")
+# below) and read by the server's session_state(). A session name is globally unique in
+# kore, so a flat dir keyed by tmux session name is safe.
+AGENT_STATE_DIR = os.path.join(RUNTIME_DIR, "agent-state")
+# How long a hook may take before it gives up. Claude Code waits for every hook, so a hook
+# that wedges (on anything) stalls the user's prompt; losing one state update is cheaper.
+HOOK_DEADLINE_S = 2.0
 # Claude Code user settings — where we register our lifecycle hooks (idempotently).
 CLAUDE_SETTINGS = os.path.expanduser(
     os.environ.get("KORE_CLAUDE_SETTINGS") or "~/.claude/settings.json")
@@ -410,7 +418,7 @@ def _write_status(**kw) -> None:
     rec = {"at": time.time(), "pid": os.getpid(), "node_ip": NODE_IP,
            "server": KORE_BRIDGE_URL, **kw}
     try:
-        os.makedirs(STATE_DIR, exist_ok=True)
+        os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
         tmp = f"{STATUSFILE}.tmp.{os.getpid()}"
         with open(tmp, "w") as f:
             json.dump(rec, f)
@@ -582,7 +590,7 @@ def _read_state(session: str) -> dict | None:
 
 
 def write_state(session: str, state: str, event: str, detail: str) -> None:
-    os.makedirs(AGENT_STATE_DIR, exist_ok=True)
+    os.makedirs(AGENT_STATE_DIR, mode=0o700, exist_ok=True)
     path = os.path.join(AGENT_STATE_DIR, session + ".json")
     now = time.time()
     since = now
@@ -598,8 +606,20 @@ def write_state(session: str, state: str, event: str, detail: str) -> None:
 
 
 def hook_main(event: str) -> int:
-    """`kore-agent.py hook <EVENT>`: the Claude Code hook entry point. Never blocks or
-    errors out — it always exits 0 with empty stdout so it cannot disturb Claude's flow."""
+    """`kore-agent.py hook <EVENT>`: the Claude Code hook entry point. Never errors out and
+    never takes longer than HOOK_DEADLINE_S — it always exits 0 with empty stdout so it
+    cannot disturb Claude's flow. The work runs on a thread; past the deadline we leave
+    without it (os._exit: a thread stuck in I/O must not hold the process open)."""
+    t = threading.Thread(target=_hook_work, args=(event,), daemon=True)
+    t.start()
+    t.join(HOOK_DEADLINE_S)
+    if t.is_alive():
+        sys.stdout.flush()
+        os._exit(0)
+    return 0
+
+
+def _hook_work(event: str) -> None:
     try:
         raw = sys.stdin.read()
     except Exception:  # noqa: BLE001
@@ -615,14 +635,13 @@ def hook_main(event: str) -> int:
         # Only record kore-managed sessions; the hooks are global but the server only ever
         # reads prefixed names, so a plain claude session on this machine stays untouched.
         if not session or not session.startswith(TMUX_PREFIX):
-            return 0
+            return
         state, detail = classify_hook(event, payload, _read_state(session))
         if state is None:
-            return 0
+            return
         write_state(session, state, event or str(payload.get("hook_event_name") or ""), detail)
     except Exception:  # noqa: BLE001 - a hook must never surface an error to Claude
         pass
-    return 0
 
 
 _HOOK_SIG = "kore-agent.py hook "   # how we recognize (and replace) our own hook entries
@@ -635,7 +654,14 @@ def install_hooks() -> bool:
     if os.environ.get("KORE_NO_HOOKS"):
         return False
     agent = os.path.abspath(__file__)
-    command = f"{shlex.quote(sys.executable or 'python3')} {shlex.quote(agent)} hook"
+    # Claude Code starts hooks with ITS environment, not ours: pin the runtime dir so the
+    # hook writes where this agent (and the board) reads. `-I` (isolated): no PYTHONPATH,
+    # no user site, no cwd on sys.path. The hook runs in Claude's cwd — often an NFS project
+    # dir — and a PYTHONPATH with an empty entry (e.g. ":/x") puts that cwd first, so every
+    # stdlib import stat()ed NFS before our code ran; a stall there held the user's prompt
+    # until Claude's 30s hook timeout. The hook only needs the stdlib.
+    command = (f"KORE_RUNTIME_DIR={shlex.quote(RUNTIME_DIR)} "
+               f"{shlex.quote(sys.executable or 'python3')} -I {shlex.quote(agent)} hook")
     try:
         data: dict = {}
         if os.path.exists(CLAUDE_SETTINGS):
@@ -656,7 +682,13 @@ def install_hooks() -> bool:
             groups = hooks.get(ev)
             groups = list(groups) if isinstance(groups, list) else []
             kept = [g for g in groups if not _is_our_group(g)]
-            kept.append({"hooks": [{"type": "command", "command": f"{command} {ev}"}]})
+            # Guarded: settings.json often lives on a shared home that outlives this install
+            # (a reimaged machine keeps ~/.claude but loses a local /root/kore). A missing
+            # script makes python exit 2, and exit 2 from UserPromptSubmit BLOCKS the user's
+            # prompt — so a missing file is a silent no-op, and the hook always exits 0.
+            # `timeout`: Claude's own cap (default 30s) — our hook is done in ~0.1s.
+            kept.append({"hooks": [{"type": "command", "timeout": 5,
+                                    "command": f"[ -f {shlex.quote(agent)} ] && {command} {ev}; exit 0"}]})
             if kept != groups:
                 changed = True
             hooks[ev] = kept
@@ -851,11 +883,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _write_portfile(port: int) -> None:
-    os.makedirs(STATE_DIR, exist_ok=True)
+    os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
     tmp = f"{PORTFILE}.tmp.{os.getpid()}"
     with open(tmp, "w") as f:
         f.write(str(port))
     os.replace(tmp, PORTFILE)
+
+
+class _AgentServer(ThreadingHTTPServer):
+    # listen() backlog (stdlib default 5): several taps + /exec arriving together must not
+    # overflow it, or the kernel drops SYNs and the server's call waits out a retry.
+    request_queue_size = 128
 
 
 def main() -> int:
@@ -874,13 +912,13 @@ def main() -> int:
         log("WARNING: KORE_AGENT_TOKEN is empty — auth is OFF (bound to localhost only).")
 
     try:
-        httpd = ThreadingHTTPServer((KORE_AGENT_BIND, KORE_AGENT_PORT), Handler)
+        httpd = _AgentServer((KORE_AGENT_BIND, KORE_AGENT_PORT), Handler)
     except OSError as exc:
         if not _port_env.strip() and KORE_AGENT_PORT == DEFAULT_AGENT_PORT:
             # The default port is taken (another agent, or anything else): fall back to an
             # OS-chosen one rather than fail. An explicit KORE_AGENT_PORT is honoured strictly.
             log(f"port {DEFAULT_AGENT_PORT} unavailable ({exc}); using an OS-chosen port")
-            httpd = ThreadingHTTPServer((KORE_AGENT_BIND, 0), Handler)
+            httpd = _AgentServer((KORE_AGENT_BIND, 0), Handler)
         else:
             raise
     httpd.daemon_threads = True

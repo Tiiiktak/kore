@@ -11,13 +11,9 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { setLabel } from '@/lib/api'
+import type { RenameTarget } from '@/lib/ui'
 
-export interface RenameTarget {
-  kind: 'node' | 'session'
-  key: string
-  current: string // current display name
-  placeholder: string // the raw name/ip, shown as placeholder when no custom name
-}
+export type { RenameTarget }
 
 // Set a display name (备注) for a session or machine. Empty = clear (revert to the raw name).
 export function RenameDialog({

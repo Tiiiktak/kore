@@ -45,9 +45,14 @@ export function AdoptDialog({
   const [loading, setLoading] = useState(false)
   const [busyName, setBusyName] = useState('')
 
+  // Default machine only when nothing is picked: reset on OPEN, not on every roster poll
+  // (which rebuilds `nodes` and used to snap the picker back to the default every ~6s).
   useEffect(() => {
-    if (open) setNode(ips.find((i) => nodes[i]?.self) || ips[0] || '')
-  }, [open, ips, nodes])
+    if (open) setNode('')
+  }, [open])
+  useEffect(() => {
+    if (open && !node && ips.length) setNode(ips.find((i) => nodes[i]?.self) || ips[0])
+  }, [open, node, ips, nodes])
 
   useEffect(() => {
     if (!open || !node) return
@@ -87,7 +92,7 @@ export function AdoptDialog({
       <DialogContent className="sm:max-w-[460px]">
         <DialogHeader>
           <DialogTitle>接管已有 session</DialogTitle>
-          <DialogDescription>把机器上没带 kore- 前缀的 tmux 会话纳入管理（改名加前缀，内容不动）。</DialogDescription>
+          <DialogDescription>把机器上没带 kore- 前缀的 tmux session 纳入管理（改名加前缀，内容不动）。</DialogDescription>
         </DialogHeader>
         <Select value={node} onValueChange={setNode}>
           <SelectTrigger className="w-full">
@@ -105,7 +110,7 @@ export function AdoptDialog({
           {loading && <div className="text-muted-foreground py-6 text-center text-sm">读取中…</div>}
           {err && <div className="text-muted-foreground py-6 text-center text-sm">{err}</div>}
           {!loading && !err && list.length === 0 && (
-            <div className="text-muted-foreground py-6 text-center text-sm">这台机器上没有未纳管的 tmux 会话</div>
+            <div className="text-muted-foreground py-6 text-center text-sm">这台机器上没有未纳管的 tmux session</div>
           )}
           {list.map((u) => (
             <div key={u.name} className="hover:bg-accent flex items-center gap-2 rounded-md px-3 py-2">

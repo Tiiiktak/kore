@@ -1,14 +1,15 @@
 import { type KeyboardEvent, useEffect, useMemo, useState } from 'react'
 import { Plus } from 'lucide-react'
-import { toast } from 'sonner'
 import { useRosterCtx } from '@/lib/roster-context'
-import { apiGet, kPost } from '@/lib/api'
+import { apiGet } from '@/lib/api'
+import { useSessionCreate } from '@/hooks/useSessionCreate'
 import { wmStore } from '@/lib/wm/store'
 import { listWins } from '@/lib/wm/tree'
 import { buildNodes, emptyLabels, nodeName, nodeOrder, sessName, sessKey, type NodeView } from '@/lib/kore'
 import type { Labels, Session } from '@/lib/types'
 import { normUrl } from '@/lib/wm/web'
 import { StatusDot } from '@/components/StatusDot'
+import { DirPicker } from '@/components/DirPicker'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -122,10 +123,9 @@ export function useListKeyNav<T>(items: T[], onEnter: (item: T) => void) {
   return { idx, onKeyDown }
 }
 
-// New-session flow: POST start, then wait for the session to appear in the roster and drop it
-// into the window. Surfaces background failures (name taken, node down) as real toasts rather
-// than a silent "启动中…" that only ends in a timeout.
-export function useSessionCreate(opts: {
+// The launcher's create flow: the shared hook, dropping the new session into THIS window once
+// it appears in the roster.
+export function useWindowSessionCreate(opts: {
   winId: string
   prefix: string
   labels: Labels
@@ -133,16 +133,7 @@ export function useSessionCreate(opts: {
   onPicked: () => void
 }) {
   const { winId, prefix, labels, nodes, onPicked } = opts
-  const { roster, refresh } = useRosterCtx()
-  const rows = useMemo(() => roster?.sessions || [], [roster])
-  const [pending, setPending] = useState<{ node_ip: string; full: string; bare: string } | null>(null)
-
-  // A session we just created shows up in the roster a moment later — when it does, drop it
-  // into this window automatically (start only types the launch command; roster lags ~2.5s).
-  useEffect(() => {
-    if (!pending) return
-    const hit = rows.find((s) => s.node_ip === pending.node_ip && (s.name === pending.full || s.name === pending.bare))
-    if (!hit) return
+  return useSessionCreate((hit) => {
     wmStore.setWin(winId, 'term', {
       node_ip: hit.node_ip,
       name: hit.name,
@@ -150,65 +141,8 @@ export function useSessionCreate(opts: {
       label: sessName(hit, labels, prefix),
       node: nodeName(hit.node_ip, nodes, labels),
     })
-    setPending(null)
     onPicked()
-  }, [rows, pending, winId, labels, prefix, nodes, onPicked])
-
-  // Returns true once the launch request was accepted (so the caller can collapse its form).
-  const run = async (node_ip: string, name: string, cwd: string): Promise<boolean> => {
-    const nm = name.trim()
-    if (!nm || !node_ip) return false
-    const full = prefix + nm
-    // Pre-check the most common failure — a name already taken on that machine — so it's an
-    // instant, clear message rather than a silent wait.
-    if (rows.some((s) => s.node_ip === node_ip && s.name === full)) {
-      toast.error('这个名字已存在', { description: full })
-      return false
-    }
-    let res: { id?: string }
-    try {
-      res = await kPost<{ id?: string }>('start', { node_ip, name: nm, cwd: cwd || '~', role: '' })
-    } catch (e) {
-      toast.error('新建失败', { description: (e as Error).message })
-      return false
-    }
-    setPending({ node_ip, full, bare: nm })
-    toast('已新建会话，启动中…', { description: full })
-    // `start` is a background job and the roster poll is a cached scan. Force a few re-scans so
-    // the session appears (the pending-match effect then fills the window), AND watch the job
-    // so a background failure surfaces as a real error instead of a silent timeout.
-    ;[600, 1800, 3500, 6000, 9000].forEach((ms) => setTimeout(() => refresh(), ms))
-    const jid = res?.id
-    if (jid) {
-      let tries = 0
-      const poll = setInterval(async () => {
-        tries += 1
-        try {
-          const j = await apiGet<{ state?: string; ok?: boolean; error?: string }>('/api/kore/job?id=' + encodeURIComponent(jid))
-          if (j.state === 'failed' || j.ok === false) {
-            clearInterval(poll)
-            setPending(null)
-            toast.error('新建失败', { description: j.error || '未知原因' })
-          } else if (j.state === 'done') {
-            clearInterval(poll)
-          }
-        } catch {
-          /* transient poll error — keep trying */
-        }
-        if (tries >= 10) clearInterval(poll)
-      }, 1200)
-    }
-    setTimeout(
-      () =>
-        setPending((p) =>
-          p && p.node_ip === node_ip && p.bare === nm ? (toast.error('会话没出现', { description: '可刷新，或回总览确认' }), null) : p,
-        ),
-      14_000,
-    )
-    return true
-  }
-
-  return { pending, run }
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -372,7 +306,7 @@ export function TermPicker({
   const [q, setQ] = useState('')
   const rows = useMemo(() => roster?.sessions || [], [roster])
   const openKeys = useOpenKeys()
-  const create = useSessionCreate({ winId, prefix, labels, nodes, onPicked })
+  const create = useWindowSessionCreate({ winId, prefix, labels, nodes, onPicked })
 
   const base = q
     ? rows.filter((s) => (sessName(s, labels, prefix) + ' ' + s.name + ' ' + nodeName(s.node_ip, nodes, labels)).toLowerCase().includes(q.toLowerCase()))
@@ -394,8 +328,8 @@ export function TermPicker({
         value={q}
         onChange={(e) => setQ(e.target.value)}
         onKeyDown={nav.onKeyDown}
-        placeholder="过滤会话 / 机器"
-        aria-label="过滤会话"
+        placeholder="过滤 session / 机器"
+        aria-label="过滤 session"
         autoFocus
       />
       <ScrollArea className="max-h-[46vh]">
@@ -415,7 +349,7 @@ export function TermPicker({
           ))}
           {!shown.length && (
             <div className="text-muted-foreground py-4 text-center text-xs">
-              {rows.length ? '没有匹配的会话' : ctx ? '这台机器还没有会话，用上面的「新建会话」建一个。' : '还没有会话，用上面的「新建会话」建一个。'}
+              {rows.length ? '没有匹配的 session' : ctx ? '这台机器还没有 session，用上面的「新建 session」建一个。' : '还没有 session，用上面的「新建 session」建一个。'}
             </div>
           )}
         </div>
@@ -424,7 +358,7 @@ export function TermPicker({
   )
 }
 
-// New-session control: a dashed "新建会话" button that expands into a name input. With sibling
+// New-session control: a dashed "新建 session" button that expands into a name input. With sibling
 // context it targets that machine + cwd; without, it shows a machine picker first (no more
 // dead-end "go back to overview").
 function CreateSession({
@@ -438,14 +372,20 @@ function CreateSession({
   ctxCwd: string
   nodes: Record<string, NodeView>
   labels: Labels
-  create: ReturnType<typeof useSessionCreate>
+  create: ReturnType<typeof useWindowSessionCreate>
 }) {
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
+  const [cwd, setCwd] = useState('~')
   const ips = useMemo(() => Object.keys(nodes).sort((a, b) => (nodeOrder(a, nodes) < nodeOrder(b, nodes) ? -1 : 1)), [nodes])
   const [ip, setIp] = useState(() => (ctx && nodes[ctx.node_ip] ? ctx.node_ip : ips.find((i) => nodes[i]?.self) || ips[0] || ''))
   const target = ctx ? ctx.node_ip : ip
-  const cwd = ctx ? ctxCwd || '~' : '~'
+
+  // Seed the working dir from the sibling terminal's live cwd when entering the create form (and
+  // whenever that context resolves/changes), so the picker opens pointed at the same place.
+  useEffect(() => {
+    if (creating) setCwd(ctxCwd || '~')
+  }, [creating, ctxCwd])
 
   const submit = async () => {
     const ok = await create.run(target, newName, cwd)
@@ -458,14 +398,14 @@ function CreateSession({
   if (create.pending) {
     return (
       <div className="text-muted-foreground flex h-9 items-center justify-center gap-2 text-xs">
-        <span className="size-3 animate-spin rounded-full border-2 border-current border-t-transparent" /> 新建的会话启动中…
+        <span className="size-3 animate-spin rounded-full border-2 border-current border-t-transparent" /> 新建的 session 启动中…
       </div>
     )
   }
   if (!creating) {
     return (
       <Button variant="outline" size="default" className="w-full justify-start border-dashed" onClick={() => setCreating(true)}>
-        <Plus /> 在 {ctx ? ctx.node || '同机器' : '指定机器'} 新建会话
+        <Plus /> 在 {ctx ? ctx.node || '同机器' : '指定机器'} 新建 session
         {ctx && ctxCwd && <span className="text-muted-foreground ml-auto max-w-[45%] truncate font-mono text-[11px]">（{ctxCwd}）</span>}
       </Button>
     )
@@ -482,12 +422,13 @@ function CreateSession({
             if (e.key === 'Enter') submit()
             if (e.key === 'Escape') setCreating(false)
           }}
-          placeholder={`在 ${ctx ? ctx.node || '同机器' : nodeName(target, nodes, labels) || '机器'} 新建会话名`}
+          placeholder={`在 ${ctx ? ctx.node || '同机器' : nodeName(target, nodes, labels) || '机器'} 新建 session 名`}
         />
         <Button size="default" onClick={submit}>
           新建
         </Button>
       </div>
+      <DirPicker nodeIp={target} value={cwd} onChange={setCwd} disabled={!target} />
     </div>
   )
 }

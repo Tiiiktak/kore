@@ -6,6 +6,62 @@ All notable changes to **kore** are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-11-09
+
+### Added
+- **Terminal share links.** Any session can mint a narrow, expiring, revocable capability for
+  *one* session — created from the window's share menu. Two scopes: `read` (watch the live
+  screen) and `chat` (also send the agent a one-line message and get its reply, through the
+  same audited write door as the board's own `send`). A share opens a stripped page at
+  `/s/<token>` for people; agents use the link as an API (`GET /api/share/<token>` for its
+  capabilities, `/read` for the screen, `POST /api/share/<token>/send`). Each link is its own
+  random token (only its hash is stored), scoped to one session, with a 1h/24h/7d lifetime and
+  a per-link chat rate limit — never the board token. Every share message is audited with the
+  originating link.
+- **Unified notification module** — browser (Notification API) + sound, edge-triggered on the
+  需要你 / 刚完成 transitions, with per-event toggles in settings.
+- **Workspace tab grouping** — bucket the tab strip by machine or by user-defined groups,
+  with collapsible headers in both the top bar and the side rail.
+- **Click-through directory picker** for the new-session / files flows, plus an animated
+  tab-group collapse.
+- **`kore doctor` network-filesystem check** — warns when the install dir or the runtime dir
+  sits on NFS/GPFS (where a stalled `open()` freezes the board).
+- **KPI tiles are now a state filter** on the overview (click 需回复 / 运行中 / 刚完成), and the
+  `⌘K` palette gained jump-to-next-需要你/刚完成, rename, end-session, and theme commands.
+- **`sysinfo_gpu` setting** (default off) — the overview only runs `nvidia-smi` when asked.
+
+### Changed
+- **All hot state moved to a host-local runtime dir** (`KORE_RUNTIME_DIR`, default
+  `/tmp/kore-<uid>`): board/client logs, pid/run files, the `ccops/` ledgers, the agent
+  registry, and the hooks' `agent-state/`. `~/.kore` now holds only durable state (tokens,
+  labels, config, the session registry). The board, every child process, and the Claude hooks
+  all start from local disk with `python3 -I`. This is the structural fix for the NFS freezes.
+- **One session-state palette** (`--st-*`): dots, card tags, KPI tiles and tab badges all read
+  the same tokens, so a state never changes colour by location.
+- **Settings split** — version / upgrade / rollback / proxy moved out of the popover into a
+  dedicated 版本与升级 dialog; the popover keeps the everyday display + notification prefs.
+- **One new-session flow** shared by the overview dialog and an empty window's launcher;
+  creating from the overview no longer auto-opens a workspace.
+- **listen() backlog raised 5 → 128** on the board and the agent, so concurrent page loads and
+  heartbeats no longer overflow it into dropped SYNs.
+- **Roster is stale-while-revalidate** — an expired cache is served at once and refreshed in
+  the background, so a slow sweep never blocks a poll.
+
+### Fixed
+- **NFS stalls froze the entire board.** Under Python 3.10, a child spawned while the parent
+  held any NFS fd made `vfork` wait with the GIL held; the board ran from, and logged to, a
+  network home. Moving code and hot state to local disk (above) removes every such fd.
+- **Claude hooks timed out at 30s and held up the prompt** — a leading empty `PYTHONPATH` entry
+  put the NFS cwd on `sys.path`, so each hook import stat()ed NFS. Hooks now run `python3 -I`,
+  self-limit to ~2s, and no-op (exit 0) when their script is missing.
+- **Copy button did nothing over plain-http** (no secure context → no `navigator.clipboard`):
+  fall back to `execCommand`, with the textarea placed inside the dialog to dodge its focus trap.
+- **The add-a-machine one-liner was truncated** — commands now wrap in full, and there is a
+  combined install-and-join line.
+- **New-session / adopt dialogs reset every ~6s** as the roster polled; they now reset only on
+  open.
+- **A wedged `nvidia-smi` stalled the overview metrics sweep** — GPU querying is now opt-in.
+
 ## [0.5.6] — 2026-10-26
 
 ### Added

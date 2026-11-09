@@ -3,25 +3,37 @@
 @import "shadcn/tailwind.css";
 
 @custom-variant dark (&:is(.dark *));
+/* touch screens have no hover: anything revealed on hover must be shown outright there */
+@custom-variant touch (@media (hover: none));
 
 /* kore palette mapped onto shadcn tokens (ported from the old board's :root / html.dark),
-   plus kore's own status colors so Tailwind utilities like text-busy / bg-brand/10 exist. */
+   plus kore's own status colors so Tailwind utilities like text-st-busy / bg-brand/10 exist. */
 @theme inline {
     --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
       'Microsoft YaHei', 'Noto Sans CJK SC', Roboto, Helvetica, Arial, sans-serif;
     --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
     --font-heading: var(--font-sans);
     --color-ok: var(--ok);
-    --color-busy: var(--busy);
-    --color-waiting: var(--waiting);
-    --color-idle: var(--idle);
+    --color-warn: var(--warn);
     --color-bad: var(--bad);
+    --color-info: var(--info);
     --color-claude: var(--claude);
     --color-brand: var(--brand);
     --color-ok-bg: var(--ok-bg);
-    --color-busy-bg: var(--busy-bg);
-    --color-idle-bg: var(--idle-bg);
+    --color-warn-bg: var(--warn-bg);
+    --color-bad-bg: var(--bad-bg);
+    --color-info-bg: var(--info-bg);
     --color-brand-bg: var(--brand-bg);
+    --color-st-busy: var(--st-busy);
+    --color-st-waiting: var(--st-waiting);
+    --color-st-done: var(--st-done);
+    --color-st-idle: var(--st-idle);
+    --color-st-dead: var(--st-dead);
+    --color-st-tmux: var(--st-tmux);
+    --color-st-busy-bg: var(--st-busy-bg);
+    --color-st-waiting-bg: var(--st-waiting-bg);
+    --color-st-done-bg: var(--st-done-bg);
+    --color-st-dead-bg: var(--st-dead-bg);
 
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
@@ -80,20 +92,32 @@
     --border: #e4e4e7;
     --input: #e4e4e7;
     --ring: #8e8e93;
-    /* kore status + brand */
+    /* generic feedback tones (metrics, results, warnings) — NOT session state */
     --ok: #1a7f37;
-    --busy: #9a6700;
-    --waiting: #c2410c;
-    --idle: #0969da;
-    --done: #0969da;
+    --warn: #9a6700;
     --bad: #cf222e;
+    --info: #0969da;
+    --ok-bg: #e9f5ec;
+    --warn-bg: #fdf4e0;
+    --bad-bg: #fcebec;
+    --info-bg: #e9f2fd;
+    /* session state — the ONE palette for dots, tags, KPI tiles and tab badges (StatusDot) */
+    --st-busy: #1a7f37;
+    --st-waiting: #9a6700;
+    --st-done: #0969da;
+    --st-idle: #6e7781;
+    --st-dead: #cf222e;
+    --st-tmux: #8c959f;
+    --st-busy-bg: #e9f5ec;
+    --st-waiting-bg: #fdf4e0;
+    --st-done-bg: #e9f2fd;
+    --st-dead-bg: #fcebec;
+    /* brand */
     --claude: #d77757;
     --brand: #8250df;
-    --ok-bg: #e9f5ec;
-    --busy-bg: #fdf4e0;
-    --idle-bg: #e9f2fd;
     --brand-bg: #f2ecfd;
-    --bad-bg: #fcebec;
+    /* terminals and code previews stay dark in both themes */
+    --term-bg: #212121;
     --chart-1: #8250df;
     --chart-2: #0969da;
     --chart-3: #1a7f37;
@@ -129,18 +153,27 @@
     --input: #2a3039;
     --ring: #6e7781;
     --ok: #3fb950;
-    --busy: #d29922;
-    --waiting: #e0a080;
-    --idle: #58a6ff;
-    --done: #58a6ff;
+    --warn: #d29922;
     --bad: #f85149;
+    --info: #58a6ff;
+    --ok-bg: #122119;
+    --warn-bg: #241c0e;
+    --bad-bg: #2b1416;
+    --info-bg: #10203a;
+    /* waiting is a clean yellow here so it never reads as the (peach) brand colour */
+    --st-busy: #3fb950;
+    --st-waiting: #e3b341;
+    --st-done: #58a6ff;
+    --st-idle: #8b949e;
+    --st-dead: #f85149;
+    --st-tmux: #6e7681;
+    --st-busy-bg: #122119;
+    --st-waiting-bg: #2a2111;
+    --st-done-bg: #10203a;
+    --st-dead-bg: #2b1416;
     --claude: #e0a080;
     --brand: #a371f7;
-    --ok-bg: #122119;
-    --busy-bg: #241c0e;
-    --idle-bg: #10203a;
     --brand-bg: #1e1830;
-    --bad-bg: #2b1416;
     --chart-1: #a371f7;
     --chart-2: #58a6ff;
     --chart-3: #3fb950;

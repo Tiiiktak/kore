@@ -7,6 +7,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { kPost, TOKEN } from '@/lib/api'
+import { copyText } from '@/lib/clipboard'
 import { markActed } from '@/lib/seen'
 import { kws } from './kws'
 import { fontGet, wantsWebgl } from './settings'
@@ -59,9 +60,19 @@ interface Frame {
   prime?: boolean
 }
 
-// Material-ish theme on a near-black bg (terminals stay dark regardless of app theme).
+// The one terminal/preview background, defined in index.css (--term-bg) so the xterm canvas, its
+// host and the file preview can't drift apart. Terminals stay dark regardless of app theme.
+function termBg(): string {
+  try {
+    return getComputedStyle(document.documentElement).getPropertyValue('--term-bg').trim() || '#212121'
+  } catch {
+    return '#212121'
+  }
+}
+
+// Material-ish theme on that near-black bg.
 const THEME = {
-  background: '#212121', foreground: '#EEFFFF', cursor: '#FFCB6B', cursorAccent: '#000000',
+  background: termBg(), foreground: '#EEFFFF', cursor: '#FFCB6B', cursorAccent: '#000000',
   selectionBackground: '#2f5d8a', selectionForeground: '#ffffff',
   black: '#000000', red: '#FF5370', green: '#C3E88D', yellow: '#FFCB6B', blue: '#82AAFF',
   magenta: '#C792EA', cyan: '#89DDFF', white: '#ffffff',
@@ -94,32 +105,12 @@ function harden(term: Terminal, copy: () => void) {
 function copySelection(term: Terminal, say: (m: string) => void) {
   const text = term.getSelection()
   if (!text) return
-  const ta = document.createElement('textarea')
-  ta.value = text
-  ta.setAttribute('readonly', '')
-  ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0'
-  document.body.appendChild(ta)
-  let ok = false
-  try {
-    ta.select()
-    ta.setSelectionRange(0, text.length)
-    ok = document.execCommand('copy')
-  } catch {
-    ok = false
-  }
-  ta.remove()
+  void copyText(text).then((ok) => say(ok ? '已复制 ' + text.length + ' 字' : '复制失败'))
   try {
     term.focus()
   } catch {
     /* ignore */
   }
-  if (ok) say('已复制 ' + text.length + ' 字')
-  else if (navigator.clipboard?.writeText)
-    navigator.clipboard.writeText(text).then(
-      () => say('已复制 ' + text.length + ' 字'),
-      () => say('复制失败'),
-    )
-  else say('复制失败')
 }
 
 export function createKoreTerminal(

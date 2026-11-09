@@ -2489,6 +2489,35 @@ def roster(scan: str = "registry", force: bool = False) -> dict[str, Any]:
         hit = _roster_cache.get(scan)
         if not force and hit and time.time() - hit[0] < ttl:
             return hit[1]
+        # Stale-while-revalidate: an expired-but-present answer goes out at once and ONE
+        # background sweep replaces it. A sweep is usually ~0.2s but can take tens of
+        # seconds (a slow node, a wedged mount), and every browser poll used to sit through
+        # it — several at once, each running its own sweep. `force` (the refresh button,
+        # post-write rescans) still waits for the fresh answer.
+        if not force and hit:
+            if scan not in _roster_refreshing:
+                _roster_refreshing.add(scan)
+                threading.Thread(target=_roster_refresh, args=(scan,), daemon=True,
+                                 name="koreops-roster-" + scan).start()
+            return hit[1]
+    return _roster_scan(scan, pol)
+
+
+_roster_refreshing: set[str] = set()
+
+
+def _roster_refresh(scan: str) -> None:
+    try:
+        _roster_scan(scan, policy())
+    except Exception as exc:  # noqa: BLE001 - the next poll just retries
+        print(f"[koreops] background roster refresh failed: {exc!r}", file=sys.stderr, flush=True)
+    finally:
+        with _roster_lock:
+            _roster_refreshing.discard(scan)
+
+
+def _roster_scan(scan: str, pol: dict[str, Any]) -> dict[str, Any]:
+    """One sweep through the read-agent child; caches and returns the answer."""
     res = _read_call("roster-" + scan)
     if not res.get("ok"):
         return _degraded_roster(scan, res)

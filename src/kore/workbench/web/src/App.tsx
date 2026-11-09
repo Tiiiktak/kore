@@ -4,11 +4,13 @@ import { Overview, type OpenPayload } from '@/components/overview/Overview'
 import { WmStage } from '@/components/wm/WmStage'
 import { CommandPalette } from '@/components/CommandPalette'
 import { TmuxLeaderMenu } from '@/components/wm/TmuxLeaderMenu'
+import { SystemDialog } from '@/components/SystemDialog'
 import { RosterProvider, useRosterCtx } from '@/lib/roster-context'
 import { useWmVersion, wmStore } from '@/lib/wm/store'
 import { useTabSide } from '@/lib/layout'
 import { flipPlay } from '@/lib/wm/flip'
 import { useIsMobile } from '@/hooks/useIsMobile'
+import { useNotifier } from '@/hooks/useNotifier'
 import { nodeName as nodeNameOf, sessKey } from '@/lib/kore'
 import { seenStore } from '@/lib/seen'
 
@@ -17,6 +19,7 @@ function Shell() {
   const { roster } = useRosterCtx()
   const side = useTabSide()
   const mobile = useIsMobile()
+  useNotifier() // edge-triggered browser/sound alerts off the roster poll
   const leftRail = side === 'left' && !mobile
   const home = wmStore.get().view === 'home'
   // The installed build string rides the normal roster poll (roster carries `version`), so it
@@ -86,6 +89,7 @@ function Shell() {
       </div>
       <CommandPalette />
       <TmuxLeaderMenu />
+      <SystemDialog />
     </>
   )
 }

@@ -73,7 +73,7 @@ export function TerminalView({
   }, [focused, mobile])
 
   return (
-    <div className="flex size-full flex-col overflow-hidden bg-[#212121]">
+    <div className="flex size-full flex-col overflow-hidden bg-[var(--term-bg)]">
       <div className="relative min-h-0 flex-1">
         {/* Mobile: a tap (click fires only on a tap, not a scroll-drag) opens the compose box,
             so the user can start typing / dictating without first hitting the keyboard key. */}

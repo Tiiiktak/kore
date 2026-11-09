@@ -9,6 +9,7 @@ import { useWmVersion, wmStore } from '@/lib/wm/store'
 import { useRosterCtx } from '@/lib/roster-context'
 import { effectiveState, useSeenVersion } from '@/lib/seen'
 import { useIsMobile } from '@/hooks/useIsMobile'
+import { setUi } from '@/lib/ui'
 import { cn } from '@/lib/utils'
 
 // The navigation chrome. Top bar and side rail are the SAME thing — one layout rotated — so
@@ -84,16 +85,16 @@ export function Chrome({ version, orientation }: { version?: string; orientation
         {needsYou ? (
           <span
             className="kore-blink absolute top-1 right-1 size-2 rounded-full"
-            style={{ background: 'var(--busy)', boxShadow: '0 0 0 2px var(--background)' }}
-            title="有会话需要你回复"
-            aria-label="有会话需要你回复"
+            style={{ background: 'var(--st-waiting)', boxShadow: '0 0 0 2px var(--background)' }}
+            title="有 session 需要你回复"
+            aria-label="有 session 需要你回复"
           />
         ) : doneSomewhere ? (
           <span
             className="absolute top-1 right-1 size-2 rounded-full"
-            style={{ background: 'var(--done)', boxShadow: '0 0 0 2px var(--background)' }}
-            title="有会话刚完成，去看看"
-            aria-label="有会话刚完成"
+            style={{ background: 'var(--st-done)', boxShadow: '0 0 0 2px var(--background)' }}
+            title="有 session 刚完成，去看看"
+            aria-label="有 session 刚完成"
           />
         ) : null}
       </button>
@@ -108,7 +109,7 @@ export function Chrome({ version, orientation }: { version?: string; orientation
           <>
             <div className="flex-1" />
             <div className="flex items-center justify-between pl-2.5 pr-1">
-              {version && <span data-flip="nav-version" className="text-muted-foreground text-xs tabular-nums">{version}</span>}
+              {version && <VersionLabel version={version} />}
               <span data-flip="nav-settings" className="inline-flex">
                 <SettingsMenu />
               </span>
@@ -116,12 +117,25 @@ export function Chrome({ version, orientation }: { version?: string; orientation
           </>
         ) : (
           <>
-            {version && <span data-flip="nav-version" className="text-muted-foreground mr-1 text-xs tabular-nums">{version}</span>}
+            {version && <VersionLabel version={version} className="mr-1" />}
             <span data-flip="nav-settings" className="inline-flex">
               <SettingsMenu />
             </span>
           </>
         ))}
     </nav>
+  )
+}
+
+// The installed build; click → 版本与升级.
+function VersionLabel({ version, className }: { version: string; className?: string }) {
+  return (
+    <button
+      data-flip="nav-version"
+      onClick={() => setUi({ system: true })}
+      className={cn('text-muted-foreground hover:text-foreground hover:bg-accent rounded px-1 text-xs tabular-nums', className)}
+    >
+      {version}
+    </button>
   )
 }

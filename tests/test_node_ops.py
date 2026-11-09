@@ -138,8 +138,16 @@ def test_node_system_metrics_parse():
     fake = "\n".join(["LOAD 1.50 2.00 3.00 2/100 1234", "CPUS 8",
                       "MEM 16000000 4000000", "DISK 5000000 10000000",
                       "GPU_START", "0, 100, 40960", "55, 2000, 40960", "GPU_END"])
-    eng.sh = lambda ip, cmd, t=15: {"stdout": fake, "stderr": "", "rc": 0}
-    m = eng.node_system_metrics("10.2.2.2")
+    sent = []
+
+    def fake_sh(ip, cmd, t=15):
+        sent.append(cmd)
+        return {"stdout": fake, "stderr": "", "rc": 0}
+    eng.sh = fake_sh
+    eng.node_system_metrics("10.2.2.2")
+    assert "nvidia-smi" not in sent[-1], "GPU is opt-in: a wedged driver must not stall the sweep"
+    m = eng.node_system_metrics("10.2.2.2", gpu=True)
+    assert "nvidia-smi" in sent[-1]
     assert (m["load1"], m["load5"], m["load15"]) == (1.5, 2.0, 3.0)
     assert m["cpus"] == 8
     assert m["mem_total_kb"] == 16000000 and m["mem_avail_kb"] == 4000000
@@ -150,7 +158,7 @@ def test_node_system_metrics_parse():
         raise RuntimeError("node down")
     eng.sh = boom
     assert eng.node_system_metrics("10.2.2.2") == {}, "an unreachable node yields {}, not an error"
-    print("ok  node_system_metrics: parse load/cpu/mem/disk/gpu; unreachable -> {}")
+    print("ok  node_system_metrics: gpu opt-in; parse load/cpu/mem/disk/gpu; unreachable -> {}")
 
 
 def test_latest_outdated_semver():
@@ -161,3 +169,36 @@ def test_latest_outdated_semver():
     assert cli._vtuple("v0.6.0") > cli._vtuple("v0.5.99")
     assert not (cli._vtuple("v0.5.3") > cli._vtuple("v0.5.3"))
     print("ok  latest outdated: semver parse + numeric compare")
+
+
+
+def test_hook_never_outlives_its_deadline():
+    import subprocess, sys, time
+    code = (
+        "import importlib.util, time\n"
+        f"spec = importlib.util.spec_from_file_location('ka', {os.path.join(HERE, 'kore-agent.py')!r})\n"
+        "ka = importlib.util.module_from_spec(spec); spec.loader.exec_module(ka)\n"
+        "ka.HOOK_DEADLINE_S = 0.3\n"
+        "ka._hook_work = lambda ev: time.sleep(30)\n"
+        "raise SystemExit(ka.hook_main('Stop'))\n")
+    t = time.time()
+    r = subprocess.run([sys.executable, "-c", code], stdin=subprocess.DEVNULL,
+                       capture_output=True, timeout=20)
+    assert r.returncode == 0 and r.stdout == b"", r
+    assert time.time() - t < 5, "a wedged hook must not hold Claude's prompt"
+    print("ok  hook: exits 0 with empty stdout within its deadline even if the work wedges")
+
+
+def test_hook_state_dir_prefers_runtime_then_legacy():
+    import subprocess, tempfile
+    eng = _load("t_eng_hookdir", os.path.join(HERE, "kore-bridge.py"),
+                {"KORE_NODE_IP": "10.1.1.1", "KORE_AGENTS_FILE": "/tmp/none/agents.json"})
+    home, rt = tempfile.mkdtemp(), tempfile.mkdtemp()
+    os.makedirs(os.path.join(home, ".kore", "agent-state"))
+    env = {"HOME": home, "KORE_RUNTIME_DIR": rt, "PATH": os.environ.get("PATH", "")}
+    pick = lambda: subprocess.run(["sh", "-c", eng._HOOK_STATE_DIR + 'echo "$d"'],
+                                  env=env, capture_output=True, text=True).stdout.strip()
+    assert pick() == os.path.join(home, ".kore", "agent-state"), "old agent: legacy dir"
+    os.makedirs(os.path.join(rt, "agent-state"))
+    assert pick() == os.path.join(rt, "agent-state"), "new agent: host-local runtime dir"
+    print("ok  hook state dir: runtime dir when present, else the legacy ~/.kore one")
