@@ -2,6 +2,7 @@
 // URL. The proxied page runs CSP-sandboxed (opaque origin) on the board, so it can't read the
 // dashboard token — the ticket is wview-only and expires (see server _wview_ticket).
 import { apiGet } from '@/lib/api'
+import { withBase } from '@/lib/base'
 
 let ticket: { ticket: string; exp: number } | null = null
 
@@ -18,7 +19,7 @@ export async function proxyUrl(u: string): Promise<string> {
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '')
-  return (
+  return withBase(
     '/api/kore/wview/' + (await getTicket()) + '/' + b64 + '/' + a.pathname.replace(/^\//, '') + (a.search || '') + (a.hash || '')
   )
 }

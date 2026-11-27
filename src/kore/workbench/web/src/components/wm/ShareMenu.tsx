@@ -8,6 +8,7 @@ import { Hint } from '@/components/Hint'
 import { CopyLine } from '@/components/CopyLine'
 import { kShareCreate, kShareRevoke, kSharesList, type Share, type ShareScope } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { BASE } from '@/lib/base'
 
 const TTLS: Array<{ s: number; label: string }> = [
   { s: 3600, label: '1 小时' },
@@ -90,8 +91,8 @@ export function ShareMenu({ nodeIp, name }: { nodeIp: string; name: string }) {
     }
   }
 
-  const link = made?.token ? `${location.origin}/s/${made.token}` : ''
-  const api = made?.token ? `${location.origin}/api/share/${made.token}` : ''
+  const link = made?.token ? `${location.origin}${BASE}/s/${made.token}` : ''
+  const api = made?.token ? `${location.origin}${BASE}/api/share/${made.token}` : ''
 
   return (
     <Popover open={open} onOpenChange={setOpen}>

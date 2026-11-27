@@ -232,6 +232,14 @@ Other engine env (all optional): `KORE_BRIDGE_PREFIX` (tmux name prefix, default
   `allowed_keys`, `max_per_minute`, … — see the comments in the file. Edits take effect
   with no restart.
 
+## Behind a reverse proxy
+
+The dashboard can be served under a sub-path, e.g. `https://gateway/some/prefix/` → board `/`,
+as long as the proxy **strips the prefix** and forwards WebSocket upgrades and SSE unbuffered.
+No config is needed: the page derives the prefix from its own URL and sends every request
+(`/api/*`, `/ws`, share links) under it. The browser-window proxy (`/api/kore/wview/*`)
+rewrites pages server-side with root-relative links and still assumes the board is at `/`.
+
 ## HTTP endpoints (all need the WB token except `/api/health`)
 
 `GET /api/state` · `/api/kore/roster` · `/api/kore/read` · `/api/kore/stream` (SSE line-diff) ·
