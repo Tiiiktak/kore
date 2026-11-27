@@ -6,6 +6,7 @@ import { BrandMark } from '@/components/BrandMark'
 import { StatusDot } from '@/components/StatusDot'
 import { CopyLine } from '@/components/CopyLine'
 import { STATE_LABEL } from '@/lib/kore'
+import { BASE } from '@/lib/base'
 
 interface Info {
   ok: boolean
@@ -24,7 +25,7 @@ const POLL_MS = 1500
 // "chat" link — a box to message the agent in it. Everything goes through /api/share/<token>,
 // which the board checks against the link; the page holds no board token.
 export function SharePage({ token }: { token: string }) {
-  const base = `/api/share/${token}`
+  const base = `${BASE}/api/share/${token}`
   const [info, setInfo] = useState<Info | null>(null)
   const [dead, setDead] = useState('')
   const [state, setState] = useState('')

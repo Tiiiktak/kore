@@ -2,13 +2,18 @@
 // Auth: reads send Authorization: Bearer <token> (server also accepts ?token=), writes REQUIRE
 // the Bearer header (never ?token=). Token comes from the page URL ?token=, same as before.
 
+import { withBase } from '@/lib/base'
+
 export const TOKEN = new URLSearchParams(location.search).get('token') || ''
+
+// Every board request is root-relative; withBase() keeps it under a reverse-proxy sub-path.
+const kfetch = (path: string, init?: RequestInit) => fetch(withBase(path), init)
 
 const authHeaders = (): Record<string, string> =>
   TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}
 
 export async function apiGet<T = unknown>(path: string): Promise<T> {
-  const r = await fetch(path, { cache: 'no-store', headers: authHeaders() })
+  const r = await kfetch(path, { cache: 'no-store', headers: authHeaders() })
   const d = await r.json().catch(() => ({ error: 'HTTP ' + r.status }))
   if (!r.ok) throw new Error((d as any).refused || (d as any).error || 'HTTP ' + r.status)
   return d as T
@@ -32,7 +37,7 @@ export async function kPost<T = unknown>(
     typeof body.node_ip === 'string' && typeof body.name === 'string'
       ? `${verb}:${body.node_ip}:${fullName(body.name)}`
       : undefined
-  const r = await fetch('/api/kore/' + verb, {
+  const r = await kfetch('/api/kore/' + verb, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(confirm !== undefined ? { ...body, confirm } : body),
@@ -52,7 +57,7 @@ export async function kFsWrite<T = unknown>(
   body: { node_ip: string; path: string } & Record<string, unknown>,
 ): Promise<T> {
   const confirm = `fs-${op}:${body.node_ip}:${body.path}`
-  const r = await fetch('/api/kore/fs/' + op, {
+  const r = await kfetch('/api/kore/fs/' + op, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ ...body, confirm }),
@@ -139,7 +144,7 @@ export async function kNode<T = unknown>(
   opts: { node_ip?: string; version?: string } = {},
 ): Promise<T> {
   const confirm = target === 'server' ? `server-${action}` : `node-${action}:${opts.node_ip ?? ''}`
-  const r = await fetch(`/api/kore/${target}/${action}`, {
+  const r = await kfetch(`/api/kore/${target}/${action}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ ...opts, confirm }),
@@ -187,7 +192,7 @@ export const kConfigGet = (): Promise<{ ok: boolean; config: KoreConfig }> =>
   apiGet('/api/kore/config')
 
 export async function kConfigSet(updates: Partial<KoreConfig>): Promise<KoreConfig> {
-  const r = await fetch('/api/kore/config', {
+  const r = await kfetch('/api/kore/config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(updates),
@@ -203,7 +208,7 @@ export const withToken = (path: string): string =>
 
 // Display label (rename) for a node or session — POST /api/labels. Empty name clears it.
 export async function setLabel(kind: 'node' | 'session', key: string, name: string): Promise<void> {
-  const r = await fetch('/api/labels', {
+  const r = await kfetch('/api/labels', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ kind, key, name, icon: '' }),
@@ -231,7 +236,7 @@ export const kSharesList = (nodeIp: string, name: string): Promise<{ ok: boolean
   apiGet(`/api/kore/shares?node_ip=${encodeURIComponent(nodeIp)}&name=${encodeURIComponent(name)}`)
 
 async function sharePost<T>(path: string, body: unknown): Promise<T> {
-  const r = await fetch(path, {
+  const r = await kfetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),

@@ -11,6 +11,7 @@ import { copyText } from '@/lib/clipboard'
 import { markActed } from '@/lib/seen'
 import { kws } from './kws'
 import { fontGet, wantsWebgl } from './settings'
+import { withBase } from '@/lib/base'
 
 const COLS_MIN = 20
 const COLS_MAX = 400
@@ -435,7 +436,7 @@ export function createKoreTerminal(
       (s.window != null ? `&window=${s.window}` : '') +
       (s.pane != null ? `&pane=${s.pane}` : '') +
       (TOKEN ? `&token=${encodeURIComponent(TOKEN)}` : '')
-    const es = new EventSource(url)
+    const es = new EventSource(withBase(url))
     stream = es
     es.addEventListener('term', (ev) => applyTerm(JSON.parse((ev as MessageEvent).data)))
     es.addEventListener('err', () => say('读取失败'))

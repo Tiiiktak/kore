@@ -3,6 +3,7 @@
 // the client sends sub/unsub; the server attaches a `tmux -C attach -r`. Writes go through
 // kPost (Bearer + confirm), never here. Auth = ?token= on the /ws URL (proxied to the board).
 import { TOKEN } from '@/lib/api'
+import { BASE } from '@/lib/base'
 
 export interface KwsHandlers {
   prime?: (m: any) => void
@@ -30,6 +31,7 @@ function makeKws() {
     (location.protocol === 'https:' ? 'wss:' : 'ws:') +
     '//' +
     location.host +
+    BASE +
     '/ws' +
     (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '')
 
