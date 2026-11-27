@@ -30,7 +30,7 @@ Cutting a frontend change over to the served board is a copy:
   MUST run in the resident write agent: bridge keeps per-session locks in module globals, so
   a second process would stop serializing concurrent sends. File-browser reads/writes run a
   **fixed `python3 -I` script on the node** (`_FS_SCRIPT` / `_FS_WRITE_SCRIPT`); path policy
-  (roots = session cwds + `$HOME`; deny `~/.ssh`, key files, `/proc`…) is enforced there,
+  (roots = session cwds + `$HOME` + `KORE_FS_ROOTS`; deny `~/.ssh`, key files, `/proc`, `KORE_FS_DENY`…) is enforced there,
   after `realpath`, because only the node knows what a symlink resolves to.
 - `kore-bridge.py` — the engine; `sh(node_ip)` routes per node (self = local subprocess,
   else HTTP `/exec` on the client agent). Also an MCP-over-stdio server.

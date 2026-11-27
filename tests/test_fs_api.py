@@ -429,3 +429,51 @@ def test_put_chunk_fits_arg_limit():
                             "data": data, "append": True, "prefix": "kore-",
                             "deny_extra": ["/x/.token"]})
     assert len(cmd.encode()) < 128 * 1024, len(cmd.encode())
+
+
+# ------------------------------------------------------------------ KORE_FS_ROOTS / KORE_FS_DENY
+
+def test_extra_roots_browsable_and_listed(env, tmp_path):
+    work = tmp_path / "work"
+    (work / "proj").mkdir(parents=True)
+    (work / "proj" / "a.txt").write_text("hi")
+    (tmp_path / "other").mkdir()
+    env["env"]["KORE_FS_ROOTS"] = os.pathsep.join([str(work), "relative/ignored"])
+    r = run(env, op="roots", prefix="")
+    assert r["ok"] is True
+    assert [x["path"] for x in r["roots"]] == [real(env["home"]), real(work)]
+    assert r["roots"][1]["label"] == real(work)
+    lst = run(env, op="list", path=str(work / "proj"))
+    assert lst["ok"] is True and [e["name"] for e in lst["entries"]] == ["a.txt"]
+    assert run(env, op="read", path=str(work / "proj" / "a.txt"))["ok"] is True
+    # siblings of an extra root are still outside every root
+    assert "refused" in run(env, op="list", path=str(tmp_path / "other"))
+
+
+def test_extra_roots_keep_secret_dirs_and_deny(env, tmp_path):
+    work = tmp_path / "work"
+    for d in (".ssh", ".kore", "creds", "ok"):
+        (work / d).mkdir(parents=True)
+        (work / d / "f").write_text("x")
+    env["env"]["KORE_FS_ROOTS"] = str(work)
+    env["env"]["KORE_FS_DENY"] = str(work / "creds")
+    for d in (".ssh", ".kore", "creds"):
+        for op in ("list", "read"):
+            p = work / d if op == "list" else work / d / "f"
+            assert "refused" in run(env, op=op, path=str(p)), (d, op)
+        assert "refused" in runw(env, op="put", path=str(work / d / "g"),
+                                 data=_b64.b64encode(b"x").decode()), d
+    assert run(env, op="read", path=str(work / "ok" / "f"))["ok"] is True
+    # an extra root that is itself denied is dropped from the roots
+    env["env"]["KORE_FS_ROOTS"] = os.pathsep.join([str(work), str(work / "creds")])
+    paths = [x["path"] for x in run(env, op="roots", prefix="")["roots"]]
+    assert real(work / "creds") not in paths and real(work) in paths
+
+
+def test_extra_roots_writes(env, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    env["env"]["KORE_FS_ROOTS"] = str(work)
+    assert runw(env, op="mkdir", path=str(work / "new"))["ok"] is True
+    assert (work / "new").is_dir()
+    assert "refused" in runw(env, op="mkdir", path=str(tmp_path / "outside"))
