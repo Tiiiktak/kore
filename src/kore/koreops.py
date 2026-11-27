@@ -799,12 +799,17 @@ def homes():
     except Exception:
         pass
     return [h for h in dict.fromkeys(hs) if h.startswith("/")]
+def env_paths(name):
+    return [os.path.normpath(x) for x in (os.environ.get(name) or "").split(os.pathsep) if x.startswith("/")]
+EXTRA_ROOTS = env_paths("KORE_FS_ROOTS")
 SYS_DIRS = ("/proc", "/sys", "/dev")
 SECRET_DIRS = []
-for h in homes():
+for h in homes() + EXTRA_ROOTS:
     for d in (".ssh", ".kore", ".cc-bridge-dsh", ".gnupg", ".aws"):
         p = os.path.join(h, d)
         SECRET_DIRS += [os.path.normpath(p), os.path.realpath(p)]
+for p in env_paths("KORE_FS_DENY"):
+    SECRET_DIRS += [p, os.path.realpath(p)]
 DENY_FILES = set()
 for f in A.get("deny_extra") or []:
     if isinstance(f, str) and f.startswith("/"):
@@ -837,13 +842,14 @@ def roots():
     h = homes()
     if h:
         found.append((None, h[0]))
+    found += [("", x) for x in EXTRA_ROOTS]
     res, seen = [], set()
     for nm, path in found:
         rp = os.path.realpath(path)
         if rp in seen or rp == "/" or denied(rp) or not os.path.isdir(rp):
             continue
         seen.add(rp)
-        label = "主目录" if nm is None else nm + " · " + (os.path.basename(rp) or rp)
+        label = "主目录" if nm is None else (rp if nm == "" else nm + " · " + (os.path.basename(rp) or rp))
         res.append({"id": u(rp), "label": u(label), "path": u(rp), "_raw": rp})
     return res
 def resolve(raw):
@@ -1135,12 +1141,17 @@ def homes():
     except Exception:
         pass
     return [h for h in dict.fromkeys(hs) if h.startswith("/")]
+def env_paths(name):
+    return [os.path.normpath(x) for x in (os.environ.get(name) or "").split(os.pathsep) if x.startswith("/")]
+EXTRA_ROOTS = env_paths("KORE_FS_ROOTS")
 SYS_DIRS = ("/proc", "/sys", "/dev")
 SECRET_DIRS = []
-for h in homes():
+for h in homes() + EXTRA_ROOTS:
     for d in (".ssh", ".kore", ".cc-bridge-dsh", ".gnupg", ".aws"):
         p = os.path.join(h, d)
         SECRET_DIRS += [os.path.normpath(p), os.path.realpath(p)]
+for p in env_paths("KORE_FS_DENY"):
+    SECRET_DIRS += [p, os.path.realpath(p)]
 DENY_FILES = set()
 for f in A.get("deny_extra") or []:
     if isinstance(f, str) and f.startswith("/"):
@@ -1173,6 +1184,7 @@ def roots():
     h = homes()
     if h:
         found.append(h[0])
+    found += EXTRA_ROOTS
     res, seen = [], set()
     for path in found:
         rp = os.path.realpath(path)
@@ -2639,7 +2651,8 @@ def _fs_call(node_ip: str, req: dict[str, Any]) -> dict[str, Any]:
 
 
 def fs_roots(node_ip: str) -> dict[str, Any]:
-    """The browsable roots on a node: each prefixed session's cwd, then $HOME."""
+    """The browsable roots on a node: each prefixed session's cwd, then $HOME, then the
+    node's own $KORE_FS_ROOTS (read where the fixed script runs, i.e. per node)."""
     return _fs_call(node_ip, {"op": "roots"})
 
 

@@ -21,7 +21,7 @@ Endpoints:
   GET  /api/kore/job?id=      one write job
   GET  /api/agents          the HTTP-agent registry the bridge routes to (TTL-pruned)
   GET  /api/kore/unmanaged    tmux sessions on a node that do not carry the prefix yet
-  GET  /api/kore/fs/{roots,list,read}   read-only file browser (roots = session cwds + $HOME)
+  GET  /api/kore/fs/{roots,list,read}   read-only file browser (roots = session cwds + $HOME + $KORE_FS_ROOTS)
   POST /api/kore/{start,stop,send,keys,input,resize,adopt}   drive a kore session; returns a job id
   POST /api/agents/register an agent pushes its {node_ip,agent_url,sessions}; fenced by
                             KORE_AGENT_TOKEN (a different trust domain from the WB token)

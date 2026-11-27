@@ -219,6 +219,8 @@ below is a `KORE_*` name — that is the only spelling the code reads.
 | `KORE_NODE_IP` | *(autodetect)* | override a node's advertised IP (use the reachable one) |
 | `WB_HOST` / `WB_PORT` | `0.0.0.0` / `8198` | dashboard bind address / port |
 | `WB_TOKEN_FILE` | `~/.kore/wb.token` | WB (browser↔dashboard) shared-token file |
+| `KORE_FS_ROOTS` | *(empty)* | extra directories the file browser / working-dir picker may browse, `:`-separated absolute paths, read **on each node** (besides `$HOME` and every session's cwd). Useful when your real work tree is not under `$HOME`. The same secret sub-dirs as `$HOME` (`.ssh`, `.kore`, …) stay off-limits; to *start* a session there, also add the path to `cwd_roots` in the allowlist |
+| `KORE_FS_DENY` | *(empty)* | extra directories the file browser must never list, read or write (`:`-separated), e.g. a credentials dir inside a `KORE_FS_ROOTS` entry |
 
 Other engine env (all optional): `KORE_BRIDGE_PREFIX` (tmux name prefix, default `kore-`),
 `KORE_REGISTRY` (the separate name→node **session** registry, default
